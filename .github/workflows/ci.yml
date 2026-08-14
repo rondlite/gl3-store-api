@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ['main', 'master']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gl3
+          POSTGRES_PASSWORD: gl3
+          POSTGRES_DB: gl3_store_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gl3"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://gl3:gl3@localhost:5432/gl3_store_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
