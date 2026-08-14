@@ -3,7 +3,6 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createPool, type Db } from './db.js';
-import { loadEnv } from './env.js';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 
@@ -67,8 +66,16 @@ export async function migrate(db: Db, log: (msg: string) => void = console.log):
 
 // Only run when invoked directly (`pnpm migrate`), not when imported by tests.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const env = loadEnv();
-  const db = createPool(env.DATABASE_URL);
+  // Deliberately not loadEnv(): migrating needs a database and nothing else,
+  // and requiring INTERNAL_API_KEY here would mean handing the deploy's admin
+  // secret to a job that has no use for it.
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    console.error('DATABASE_URL is required');
+    process.exit(1);
+  }
+
+  const db = createPool(databaseUrl);
   try {
     const ran = await migrate(db);
     console.log(ran.length === 0 ? 'nothing to apply' : `applied ${ran.length} migration(s)`);

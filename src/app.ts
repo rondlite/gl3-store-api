@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 
 import type { Db } from './db.js';
+import { type Logger, silentLogger } from './log.js';
 import { SCOPE, isSellablePackage, parsePattern } from './packages.js';
 import {
   authenticate,
@@ -18,6 +19,7 @@ import {
 export type AppDeps = {
   db: Db;
   internalApiKey: string;
+  logger?: Logger;
 };
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -32,8 +34,38 @@ function constantTimeEquals(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-export function createApp({ db, internalApiKey }: AppDeps) {
+export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDeps) {
   const app = new Hono();
+
+  // One line per request. Paths carry ids but never secrets, and bodies and
+  // headers are not logged.
+  app.use('*', async (c, next) => {
+    const startedAt = Date.now();
+    await next();
+    logger.info('request', {
+      method: c.req.method,
+      path: c.req.path,
+      status: c.res.status,
+      ms: Date.now() - startedAt,
+    });
+  });
+
+  // Without this, an unhandled throw becomes a bare 500 with nothing written
+  // anywhere -- the failure mode is a caller staring at a 500 and empty logs.
+  app.onError((err, c) => {
+    logger.error('unhandled error', {
+      method: c.req.method,
+      path: c.req.path,
+      err: err.message,
+      // Postgres puts the useful part in these, not in the message.
+      code: (err as { code?: string }).code,
+      detail: (err as { detail?: string }).detail,
+      stack: err.stack,
+    });
+    // The client gets nothing back: error text from this service can carry SQL
+    // and column names.
+    return c.json({ error: 'internal' }, 500);
+  });
 
   app.get('/healthz', async (c) => {
     try {
