@@ -30,68 +30,68 @@ function grant(userId: string, body: Record<string, unknown>) {
 describe('POST /v1/auth/authorize-package', () => {
   it('denies a package the user has not bought', async () => {
     const userId = await seedUser();
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(403);
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 
   it('allows an exactly entitled package', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/plugin-a' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a' });
 
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(200);
-    expect((await authorize(userId, '@gl3/plugin-b')).status).toBe(403);
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(200);
+    expect((await authorize(userId, '@gl3-plugins/plugin-b')).status).toBe(403);
   });
 
   it('allows any package in the scope for a wildcard entitlement', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/*', source: 'all-access' });
+    await grant(userId, { package: '@gl3-plugins/*', source: 'all-access' });
 
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(200);
-    expect((await authorize(userId, '@gl3/anything-else')).status).toBe(200);
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(200);
+    expect((await authorize(userId, '@gl3-plugins/anything-else')).status).toBe(200);
   });
 
   it('denies after the entitlement is revoked', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/plugin-a' });
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(200);
+    await grant(userId, { package: '@gl3-plugins/plugin-a' });
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(200);
 
     await h.call(`/v1/admin/users/${userId}/entitlements`, {
       method: 'DELETE',
-      body: JSON.stringify({ package: '@gl3/plugin-a' }),
+      body: JSON.stringify({ package: '@gl3-plugins/plugin-a' }),
     });
 
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(403);
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 
   it('reinstates a revoked entitlement when it is granted again', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/plugin-a' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a' });
     await h.call(`/v1/admin/users/${userId}/entitlements`, {
       method: 'DELETE',
-      body: JSON.stringify({ package: '@gl3/plugin-a' }),
+      body: JSON.stringify({ package: '@gl3-plugins/plugin-a' }),
     });
 
-    await grant(userId, { package: '@gl3/plugin-a', source: 'resubscribed' });
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(200);
+    await grant(userId, { package: '@gl3-plugins/plugin-a', source: 'resubscribed' });
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(200);
   });
 
   it('denies an expired entitlement', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/plugin-a', expiresAt: '2020-01-01T00:00:00Z' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a', expiresAt: '2020-01-01T00:00:00Z' });
 
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(403);
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 
   it('denies a disabled user who still holds the entitlement', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/*' });
+    await grant(userId, { package: '@gl3-plugins/*' });
     await h.db.query('update users set disabled_at = now() where id = $1', [userId]);
 
-    expect((await authorize(userId, '@gl3/plugin-a')).status).toBe(403);
+    expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 
   it('denies packages outside the sellable scope', async () => {
     const userId = await seedUser();
-    await grant(userId, { package: '@gl3/*' });
+    await grant(userId, { package: '@gl3-plugins/*' });
 
     // The plugin never asks about these, but the endpoint must not answer "yes"
     // for a name a wildcard row was never meant to cover.
@@ -101,16 +101,25 @@ describe('POST /v1/auth/authorize-package', () => {
 
   it('rejects granting a pattern that is not exact-or-scope', async () => {
     const userId = await seedUser();
-    expect((await grant(userId, { package: '@gl3/plugin-*' })).status).toBe(400);
+    expect((await grant(userId, { package: '@gl3-plugins/plugin-*' })).status).toBe(400);
     expect((await grant(userId, { package: '@other/*' })).status).toBe(400);
     expect((await grant(userId, { package: '**' })).status).toBe(400);
+  });
+
+  it('rejects the public engine-core scope — @gl3 is not sellable', async () => {
+    // The paid scope is @gl3-plugins; @gl3 (plugin-sdk, shared) is public by
+    // construction and the registry never asks this service about it. A grant
+    // under it would be dead weight at best and confusing at worst.
+    const userId = await seedUser();
+    expect((await grant(userId, { package: '@gl3/plugin-fixer' })).status).toBe(400);
+    expect((await grant(userId, { package: '@gl3/*' })).status).toBe(400);
   });
 
   it('does not leak one user’s entitlements to another', async () => {
     const ron = await seedUser('ron');
     const mallory = await seedUser('mallory');
-    await grant(ron, { package: '@gl3/plugin-a' });
+    await grant(ron, { package: '@gl3-plugins/plugin-a' });
 
-    expect((await authorize(mallory, '@gl3/plugin-a')).status).toBe(403);
+    expect((await authorize(mallory, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 });

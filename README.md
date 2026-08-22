@@ -8,7 +8,7 @@ package fetch it calls this service, which owns the users, tokens, and "who has 
 what" records.
 
 ```
-npm install @gl3/plugin-a
+npm install @gl3-plugins/plugin-a
         │
         ▼
    Verdaccio  ──(verdaccio-auth-gl3)──►  gl3-store-api  ──►  Postgres
@@ -21,7 +21,8 @@ npm install @gl3/plugin-a
 2. Verdaccio calls the plugin's `authenticate`, which POSTs to `/v1/auth/authenticate`.
    The response's `groups` become the user's Verdaccio groups, plus a synthetic
    `uid:<userId>` entry.
-3. On each package request Verdaccio calls `allow_access`. For `@gl3/*` names the plugin
+3. On each package request Verdaccio calls `allow_access`. For `@gl3-plugins/*` names (the
+   paid scope; `@gl3/*` is the public engine-core scope and never reaches this service) the plugin
    pulls the user id back out of that `uid:` group and POSTs `/v1/auth/authorize-package`.
 4. A 200 grants access. A 403 is turned into a hard denial by the plugin — it must not
    return "false", because in Verdaccio that means *defer to the next plugin*, and the
@@ -64,8 +65,8 @@ The plaintext token is returned by the mint call and never again — only a SHA-
 is stored. (A high-entropy random token does not need a slow KDF; there is nothing to
 brute-force offline.)
 
-`package` on an entitlement must be either an exact name (`@gl3/plugin-a`) or the scope
-wildcard `@gl3/*` for an all-access plan. Anything else is a 400. Keeping it to those
+`package` on an entitlement must be either an exact name (`@gl3-plugins/plugin-a`) or the scope
+wildcard `@gl3-plugins/*` for an all-access plan. Anything else is a 400. Keeping it to those
 two shapes makes authorization an equality lookup instead of pattern matching per
 request.
 
