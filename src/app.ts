@@ -198,7 +198,7 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
       // is not reported to the caller as a bad package name.
       if (parsePattern(body.package) === null) {
         return c.json(
-          { error: 'invalid_package', message: `expected "@gl3/name" or "${SCOPE}*"` },
+          { error: 'invalid_package', message: `expected "${SCOPE}name" or "${SCOPE}*"` },
           400
         );
       }

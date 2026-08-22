@@ -1,13 +1,18 @@
-/** Only the GL3 scope is sold, so nothing outside it is a valid entitlement. */
-export const SCOPE = '@gl3/';
+/**
+ * Only the premium scope is sold: '@gl3-plugins/' carries paid plugins, while
+ * '@gl3/' is the public engine-core scope (plugin-sdk, shared) and is readable
+ * by anyone straight from the registry's packages rules - it never reaches
+ * this service. Nothing outside the premium scope is a valid entitlement.
+ */
+export const SCOPE = '@gl3-plugins/';
 
-const EXACT = /^@gl3\/[a-z0-9][a-z0-9._-]*$/;
+const EXACT = /^@gl3-plugins\/[a-z0-9][a-z0-9._-]*$/;
 
 export type PackagePattern = { kind: 'exact'; value: string } | { kind: 'scope'; value: string };
 
 /**
  * Parses the `package` field of an entitlement. Two shapes are allowed: an
- * exact name (`@gl3/plugin-a`) or the scope wildcard (`@gl3/*`) for an
+ * exact name (`@gl3-plugins/fixer`) or the scope wildcard (`@gl3-plugins/*`) for an
  * all-access plan. Keeping it to these two means authorization is a plain
  * equality lookup rather than pattern matching at request time.
  */
