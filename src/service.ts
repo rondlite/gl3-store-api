@@ -65,22 +65,43 @@ export async function authenticate(
   };
 }
 
-/** True if the user currently holds a live entitlement covering the package. */
+/**
+ * Roles that read every paid package without an entitlement row. Publish
+ * rights already come from these roles via Verdaccio's `publish:` lists;
+ * without this bypass the publisher publishes blind — Verdaccio filters the
+ * web UI, search, and installs through allow_access, so an admin could ship
+ * a package it can never see.
+ */
+const STAFF_ROLES = ['admin', 'gl3-dev-lead'];
+
+/**
+ * True if the user currently holds a live entitlement covering the package,
+ * or is staff.
+ */
 export async function authorizePackage(
   db: Db,
   input: { userId: string; package: string }
 ): Promise<boolean> {
   const { rows } = await db.query<{ ok: boolean }>(
     `select true as ok
-       from entitlements e
-       join users u on u.id = e.user_id
-      where e.user_id = $1
-        and e.package = any($2::text[])
-        and e.revoked_at is null
-        and (e.expires_at is null or e.expires_at > now())
+       from users u
+      where u.id = $1
         and u.disabled_at is null
+        and (
+          exists (
+            select 1 from user_roles r
+             where r.user_id = u.id and r.role = any($3::text[])
+          )
+          or exists (
+            select 1 from entitlements e
+             where e.user_id = u.id
+               and e.package = any($2::text[])
+               and e.revoked_at is null
+               and (e.expires_at is null or e.expires_at > now())
+          )
+        )
       limit 1`,
-    [input.userId, grantingPatterns(input.package)]
+    [input.userId, grantingPatterns(input.package), STAFF_ROLES]
   );
 
   return rows.length > 0;
