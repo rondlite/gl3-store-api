@@ -33,6 +33,33 @@ describe('POST /v1/auth/authorize-package', () => {
     expect((await authorize(userId, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 
+  it('staff read every paid package without an entitlement row', async () => {
+    // Publish rights already come from these roles; without implicit read the
+    // publisher publishes blind (Verdaccio hides UI/search/install via
+    // allow_access).
+    const adminRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'boss', email: 'boss@gl3.dev', roles: ['admin'] }),
+    });
+    const { userId: adminId } = (await adminRes.json()) as { userId: string };
+    expect((await authorize(adminId, '@gl3-plugins/plugin-a')).status).toBe(200);
+
+    const leadRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'lead', email: 'lead@gl3.dev', roles: ['gl3-dev-lead'] }),
+    });
+    const { userId: leadId } = (await leadRes.json()) as { userId: string };
+    expect((await authorize(leadId, '@gl3-plugins/anything')).status).toBe(200);
+
+    // An unrelated role grants nothing.
+    const modRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'mod', email: 'mod@gl3.dev', roles: ['moderator'] }),
+    });
+    const { userId: modId } = (await modRes.json()) as { userId: string };
+    expect((await authorize(modId, '@gl3-plugins/plugin-a')).status).toBe(403);
+  });
+
   it('allows an exactly entitled package', async () => {
     const userId = await seedUser();
     await grant(userId, { package: '@gl3-plugins/plugin-a' });
