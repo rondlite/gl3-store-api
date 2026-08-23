@@ -164,25 +164,42 @@ export async function revokeToken(db: Db, tokenId: string): Promise<boolean> {
   return (rowCount ?? 0) > 0;
 }
 
+export type EntitlementAccess = 'download' | 'metadata';
+
 export async function grantEntitlement(
   db: Db,
-  input: { userId: string; package: string; source?: string; expiresAt?: Date }
+  input: {
+    userId: string;
+    package: string;
+    access?: EntitlementAccess;
+    source?: string;
+    expiresAt?: Date;
+  }
 ): Promise<void> {
   if (parsePattern(input.package) === null) {
     throw new Error(`not a grantable package pattern: ${input.package}`);
   }
 
   // Re-granting a previously revoked entitlement should reinstate it, which is
-  // why this is an upsert rather than an insert that conflicts.
+  // why this is an upsert rather than an insert that conflicts. `access` is part
+  // of the update set: re-granting at a different level must move the existing
+  // row rather than silently keep the old level.
   await db.query(
-    `insert into entitlements (user_id, package, source, expires_at)
-          values ($1, $2, $3, $4)
+    `insert into entitlements (user_id, package, access, source, expires_at)
+          values ($1, $2, $3, $4, $5)
      on conflict (user_id, package) do update
             set revoked_at = null,
+                access = excluded.access,
                 source = excluded.source,
                 expires_at = excluded.expires_at,
                 granted_at = now()`,
-    [input.userId, input.package, input.source ?? 'manual', input.expiresAt ?? null]
+    [
+      input.userId,
+      input.package,
+      input.access ?? 'download',
+      input.source ?? 'manual',
+      input.expiresAt ?? null,
+    ]
   );
 }
 

@@ -150,3 +150,39 @@ describe('POST /v1/auth/authorize-package', () => {
     expect((await authorize(mallory, '@gl3-plugins/plugin-a')).status).toBe(403);
   });
 });
+
+describe('entitlement access level', () => {
+  it('defaults a grant to download', async () => {
+    const userId = await seedUser();
+    expect((await grant(userId, { package: '@gl3-plugins/plugin-a' })).status).toBe(201);
+
+    const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
+    expect(rows).toEqual([{ access: 'download' }]);
+  });
+
+  it('stores an explicit metadata grant', async () => {
+    const userId = await seedUser();
+    const res = await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+    expect(res.status).toBe(201);
+
+    const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
+    expect(rows).toEqual([{ access: 'metadata' }]);
+  });
+
+  it('rejects an access level that is neither download nor metadata', async () => {
+    const userId = await seedUser();
+    const res = await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'sideways' });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_access' });
+  });
+
+  it('re-granting changes the access level in place', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'metadata' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'download' });
+
+    const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
+    expect(rows).toEqual([{ access: 'download' }]);
+  });
+});

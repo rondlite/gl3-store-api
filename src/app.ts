@@ -11,6 +11,7 @@ import {
   authorizePackage,
   createTokenForUser,
   createUser,
+  type EntitlementAccess,
   grantEntitlement,
   revokeEntitlement,
   revokeToken,
@@ -187,6 +188,7 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
       'json',
       z.object({
         package: z.string().min(1),
+        access: z.string().min(1).optional(),
         source: z.string().min(1).optional(),
         expiresAt: z.coerce.date().optional(),
       })
@@ -203,10 +205,18 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
         );
       }
 
+      if (body.access !== undefined && body.access !== 'download' && body.access !== 'metadata') {
+        return c.json(
+          { error: 'invalid_access', message: 'expected "download" or "metadata"' },
+          400
+        );
+      }
+
       try {
         await grantEntitlement(db, {
           userId: c.req.param('userId'),
           package: body.package,
+          ...(body.access !== undefined ? { access: body.access as EntitlementAccess } : {}),
           ...(body.source !== undefined ? { source: body.source } : {}),
           ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt } : {}),
         });
