@@ -60,6 +60,8 @@ secret between this service and the registry. There is no end-user-facing auth h
 | DELETE | `/v1/admin/tokens/:tokenId` | — | `200` / `404` |
 | POST | `/v1/admin/users/:userId/entitlements` | `{package, access?, source?, expiresAt?}` | `201` / `400` / `404` |
 | DELETE | `/v1/admin/users/:userId/entitlements` | `{package}` | `200` / `404` |
+| POST | `/v1/admin/catalog` | `{package, position}` | `201` / `400` |
+| DELETE | `/v1/admin/catalog/:package` | — | `200` / `404` |
 
 The plaintext token is returned by the mint call and never again — only a SHA-256 hash
 is stored. (A high-entropy random token does not need a slow KDF; there is nothing to
@@ -82,6 +84,36 @@ publisher is not blind to what they just published), then any `download` grant, 
 matches both the exact name and the scope wildcard and a user can hold one row of
 each. A missing or disabled user, or a user with no live matching entitlement,
 resolves to `not_entitled`.
+
+### Catalogue
+
+The website's package directory. `POST /v1/admin/catalog` curates the list — the
+`position` you give it is the only value you own; everything else is a cache of the
+package's registry manifest, refreshed on a timer.
+
+| Method | Path | Response |
+| --- | --- | --- |
+| GET | `/v1/catalog/packages` | the ordered list, without readmes |
+| GET | `/v1/catalog/packages/:package` | one package, including its readme |
+
+The catalogue spans both GL3 scopes: `@gl3-plugins/*`, which premium unlocks, and the
+public `@gl3/*`, which is the SDK developers build against. `paid` in the response is
+derived from the scope. Scoped names in a path must be URL-encoded — an unencoded slash
+reads as two path segments and never matches the route.
+
+`stale` is true when the last fetch failed, or has not happened, or is older than two
+refresh intervals. A failed refresh never clears cached metadata, so an unreachable
+registry shows as stale data rather than an empty site.
+
+Refreshing needs the storefront service account from the metadata-access runbook below,
+and the refresher only starts when all three of `REGISTRY_URL`, `REGISTRY_USERNAME` and
+`REGISTRY_TOKEN` are set:
+
+```bash
+curl -sX POST localhost:8080/v1/admin/catalog \
+  -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"package":"@gl3-plugins/plugin-a","position":10}'
+```
 
 ## Development
 
@@ -148,6 +180,10 @@ step so a rolling deploy cannot have N replicas racing to alter the schema.
 | `INTERNAL_API_KEY` | yes | Min 32 chars. Must match the registry's `INTERNAL_API_KEY`. `openssl rand -base64 48` |
 | `PORT` | no | Default 8080 |
 | `LOG_LEVEL` | no | Default `info` |
+| `REGISTRY_URL` | no | Registry base URL, e.g. `https://npm.gl3.dev`. Unset disables catalogue refresh |
+| `REGISTRY_USERNAME` | no | The storefront service account |
+| `REGISTRY_TOKEN` | no | Its `gl3_` token, sent as HTTP Basic |
+| `REGISTRY_REFRESH_MS` | no | Default 900000 (15 minutes) |
 
 `/healthz` returns 503 when the database is unreachable, so it works as a readiness
 probe.

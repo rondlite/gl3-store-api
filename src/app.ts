@@ -4,16 +4,22 @@ import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 
 import type { Db } from './db.js';
+import { DEFAULT_REGISTRY_REFRESH_MS } from './env.js';
 import { type Logger, silentLogger } from './log.js';
-import { SCOPE, isSellablePackage, parsePattern } from './packages.js';
+import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isPaidPackage, isSellablePackage, parsePattern } from './packages.js';
 import {
+  addCatalogPackage,
   authenticate,
   authorizePackage,
   createTokenForUser,
   createUser,
+  type CatalogRow,
   type EntitlementAccess,
+  getCatalogPackage,
   grantEntitlement,
   hasStaffRole,
+  listCatalog,
+  removeCatalogPackage,
   revokeEntitlement,
   revokeToken,
 } from './service.js';
@@ -22,6 +28,11 @@ export type AppDeps = {
   db: Db;
   internalApiKey: string;
   logger?: Logger;
+  /**
+   * How old a fetch may be before the catalogue reports it stale. Two refresh
+   * intervals by default, so a single missed pass is not reported as a problem.
+   */
+  catalogStaleMs?: number;
 };
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -36,7 +47,41 @@ function constantTimeEquals(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDeps) {
+/**
+ * Shapes a catalogue row for the website.
+ *
+ * `stale` is computed here rather than stored: a stored flag would itself go
+ * stale. `paid` is derived from the name for the same reason.
+ */
+function presentCatalogRow(
+  row: CatalogRow,
+  staleMs: number,
+  includeReadme: boolean
+): Record<string, unknown> {
+  const fetchedAt = row.fetched_at;
+  const stale =
+    row.fetch_error !== null || fetchedAt === null || Date.now() - fetchedAt.getTime() > staleMs;
+
+  return {
+    package: row.package,
+    paid: isPaidPackage(row.package),
+    position: row.position,
+    version: row.version,
+    description: row.description,
+    keywords: row.keywords ?? [],
+    license: row.license,
+    fetchedAt: fetchedAt === null ? null : fetchedAt.toISOString(),
+    stale,
+    ...(includeReadme ? { readme: row.readme } : {}),
+  };
+}
+
+export function createApp({
+  db,
+  internalApiKey,
+  logger = silentLogger(),
+  catalogStaleMs = 2 * DEFAULT_REGISTRY_REFRESH_MS,
+}: AppDeps) {
   const app = new Hono();
 
   // One line per request. Paths carry ids but never secrets, and bodies and
@@ -278,6 +323,68 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
       return revoked ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404);
     }
   );
+
+  app.post(
+    '/v1/admin/catalog',
+    zValidator('json', z.object({ package: z.string().min(1), position: z.number().int() })),
+    async (c) => {
+      const body = c.req.valid('json');
+
+      if (!isCatalogPackage(body.package)) {
+        return c.json(
+          {
+            error: 'invalid_package',
+            message: `expected "${SCOPE}name" or "${PUBLIC_SCOPE}name"`,
+          },
+          400
+        );
+      }
+
+      await addCatalogPackage(db, body);
+      return c.json({ ok: true }, 201);
+    }
+  );
+
+  app.delete('/v1/admin/catalog/:package', async (c) => {
+    const packageName = c.req.param('package');
+    if (!isCatalogPackage(packageName)) {
+      return c.json(
+        {
+          error: 'invalid_package',
+          message: `expected "${SCOPE}name" or "${PUBLIC_SCOPE}name"`,
+        },
+        400
+      );
+    }
+
+    const removed = await removeCatalogPackage(db, packageName);
+    return removed ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404);
+  });
+
+  app.get('/v1/catalog/packages', async (c) => {
+    const rows = await listCatalog(db);
+    return c.json({
+      packages: rows.map((row) => presentCatalogRow(row, catalogStaleMs, false)),
+    });
+  });
+
+  app.get('/v1/catalog/packages/:package', async (c) => {
+    const packageName = c.req.param('package');
+    if (!isCatalogPackage(packageName)) {
+      return c.json(
+        {
+          error: 'invalid_package',
+          message: `expected "${SCOPE}name" or "${PUBLIC_SCOPE}name"`,
+        },
+        400
+      );
+    }
+
+    const row = await getCatalogPackage(db, packageName);
+    return row === null
+      ? c.json({ error: 'not_found' }, 404)
+      : c.json(presentCatalogRow(row, catalogStaleMs, true));
+  });
 
   return app;
 }

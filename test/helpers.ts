@@ -38,7 +38,9 @@ export function setupHarness(): Harness {
   });
 
   beforeEach(async () => {
-    await harness.db.query('truncate users, user_roles, tokens, entitlements cascade');
+    await harness.db.query(
+      'truncate users, user_roles, tokens, entitlements, catalog_packages cascade'
+    );
   });
 
   afterAll(async () => {
