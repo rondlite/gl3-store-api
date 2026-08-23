@@ -96,3 +96,128 @@ describe('entitlement validators stay narrow', () => {
     expect(res.status).toBe(400);
   });
 });
+
+async function seedRow(pkg: string, position: number, fields: Record<string, unknown> = {}) {
+  await addPkg({ package: pkg, position });
+  const sets: string[] = [];
+  const vals: unknown[] = [pkg];
+  for (const [k, v] of Object.entries(fields)) {
+    vals.push(v);
+    sets.push(`${k} = $${vals.length}`);
+  }
+  if (sets.length > 0) {
+    await h.db.query(`update catalog_packages set ${sets.join(', ')} where package = $1`, vals);
+  }
+}
+
+describe('GET /v1/catalog/packages', () => {
+  it('orders by position then package', async () => {
+    await seedRow('@gl3-plugins/b', 2);
+    await seedRow('@gl3-plugins/a', 1);
+    await seedRow('@gl3/sdk', 1);
+
+    const res = await h.call('/v1/catalog/packages');
+    expect(res.status).toBe(200);
+    const { packages } = (await res.json()) as { packages: { package: string }[] };
+    expect(packages.map((p) => p.package)).toEqual([
+      '@gl3-plugins/a',
+      '@gl3/sdk',
+      '@gl3-plugins/b',
+    ]);
+  });
+
+  it('derives paid from the scope', async () => {
+    await seedRow('@gl3-plugins/a', 1);
+    await seedRow('@gl3/sdk', 2);
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: { package: string; paid: boolean }[];
+    };
+    expect(packages.map((p) => [p.package, p.paid])).toEqual([
+      ['@gl3-plugins/a', true],
+      ['@gl3/sdk', false],
+    ]);
+  });
+
+  it('omits the readme from the list', async () => {
+    await seedRow('@gl3-plugins/a', 1, { readme: '# hello' });
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: Record<string, unknown>[];
+    };
+    expect(packages[0]).not.toHaveProperty('readme');
+    expect(packages[0]).toMatchObject({ package: '@gl3-plugins/a' });
+  });
+
+  it('marks a never-fetched package stale', async () => {
+    await seedRow('@gl3-plugins/a', 1);
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: { stale: boolean; fetchedAt: string | null }[];
+    };
+    expect(packages[0].stale).toBe(true);
+    expect(packages[0].fetchedAt).toBeNull();
+  });
+
+  it('marks a freshly fetched package not stale', async () => {
+    await seedRow('@gl3-plugins/a', 1, { version: '1.0.0' });
+    await h.db.query("update catalog_packages set fetched_at = now() where package = $1", [
+      '@gl3-plugins/a',
+    ]);
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: { stale: boolean; version: string }[];
+    };
+    expect(packages[0].stale).toBe(false);
+    expect(packages[0].version).toBe('1.0.0');
+  });
+
+  it('marks a package with a recorded fetch error stale even when recently fetched', async () => {
+    await seedRow('@gl3-plugins/a', 1, { fetch_error: 'not_published' });
+    await h.db.query("update catalog_packages set fetched_at = now() where package = $1", [
+      '@gl3-plugins/a',
+    ]);
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: { stale: boolean }[];
+    };
+    expect(packages[0].stale).toBe(true);
+  });
+
+  it('marks a package stale once the fetch is older than two intervals', async () => {
+    await seedRow('@gl3-plugins/a', 1);
+    await h.db.query(
+      "update catalog_packages set fetched_at = now() - interval '2 hours' where package = $1",
+      ['@gl3-plugins/a']
+    );
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: { stale: boolean }[];
+    };
+    expect(packages[0].stale).toBe(true);
+  });
+});
+
+describe('GET /v1/catalog/packages/:package', () => {
+  it('includes the readme', async () => {
+    await seedRow('@gl3-plugins/a', 1, { readme: '# hello', description: 'd' });
+
+    const res = await h.call(
+      `/v1/catalog/packages/${encodeURIComponent('@gl3-plugins/a')}`
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      package: '@gl3-plugins/a',
+      paid: true,
+      description: 'd',
+      readme: '# hello',
+    });
+  });
+
+  it('404s on a package that is not catalogued', async () => {
+    const res = await h.call(
+      `/v1/catalog/packages/${encodeURIComponent('@gl3-plugins/missing')}`
+    );
+    expect(res.status).toBe(404);
+  });
+});

@@ -5,16 +5,19 @@ import { z } from 'zod';
 
 import type { Db } from './db.js';
 import { type Logger, silentLogger } from './log.js';
-import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isSellablePackage, parsePattern } from './packages.js';
+import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isPaidPackage, isSellablePackage, parsePattern } from './packages.js';
 import {
   addCatalogPackage,
   authenticate,
   authorizePackage,
   createTokenForUser,
   createUser,
+  type CatalogRow,
   type EntitlementAccess,
+  getCatalogPackage,
   grantEntitlement,
   hasStaffRole,
+  listCatalog,
   removeCatalogPackage,
   revokeEntitlement,
   revokeToken,
@@ -24,6 +27,11 @@ export type AppDeps = {
   db: Db;
   internalApiKey: string;
   logger?: Logger;
+  /**
+   * How old a fetch may be before the catalogue reports it stale. Two refresh
+   * intervals by default, so a single missed pass is not reported as a problem.
+   */
+  catalogStaleMs?: number;
 };
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -38,7 +46,41 @@ function constantTimeEquals(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
-export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDeps) {
+/**
+ * Shapes a catalogue row for the website.
+ *
+ * `stale` is computed here rather than stored: a stored flag would itself go
+ * stale. `paid` is derived from the name for the same reason.
+ */
+function presentCatalogRow(
+  row: CatalogRow,
+  staleMs: number,
+  includeReadme: boolean
+): Record<string, unknown> {
+  const fetchedAt = row.fetched_at;
+  const stale =
+    row.fetch_error !== null || fetchedAt === null || Date.now() - fetchedAt.getTime() > staleMs;
+
+  return {
+    package: row.package,
+    paid: isPaidPackage(row.package),
+    position: row.position,
+    version: row.version,
+    description: row.description,
+    keywords: row.keywords ?? [],
+    license: row.license,
+    fetchedAt: fetchedAt === null ? null : fetchedAt.toISOString(),
+    stale,
+    ...(includeReadme ? { readme: row.readme } : {}),
+  };
+}
+
+export function createApp({
+  db,
+  internalApiKey,
+  logger = silentLogger(),
+  catalogStaleMs = 2 * 900_000,
+}: AppDeps) {
   const app = new Hono();
 
   // One line per request. Paths carry ids but never secrets, and bodies and
@@ -305,6 +347,20 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
   app.delete('/v1/admin/catalog/:package', async (c) => {
     const removed = await removeCatalogPackage(db, c.req.param('package'));
     return removed ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404);
+  });
+
+  app.get('/v1/catalog/packages', async (c) => {
+    const rows = await listCatalog(db);
+    return c.json({
+      packages: rows.map((row) => presentCatalogRow(row, catalogStaleMs, false)),
+    });
+  });
+
+  app.get('/v1/catalog/packages/:package', async (c) => {
+    const row = await getCatalogPackage(db, c.req.param('package'));
+    return row === null
+      ? c.json({ error: 'not_found' }, 404)
+      : c.json(presentCatalogRow(row, catalogStaleMs, true));
   });
 
   return app;

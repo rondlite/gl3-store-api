@@ -276,3 +276,36 @@ export async function removeCatalogPackage(db: Db, packageName: string): Promise
   ]);
   return (rowCount ?? 0) > 0;
 }
+
+export type CatalogRow = {
+  package: string;
+  position: number;
+  version: string | null;
+  description: string | null;
+  keywords: string[] | null;
+  license: string | null;
+  readme: string | null;
+  fetched_at: Date | null;
+  fetch_error: string | null;
+};
+
+const CATALOG_COLUMNS = `package, position, version, description, keywords, license,
+                         readme, fetched_at, fetch_error`;
+
+export async function listCatalog(db: Db): Promise<CatalogRow[]> {
+  const { rows } = await db.query<CatalogRow>(
+    `select ${CATALOG_COLUMNS} from catalog_packages order by position, package`
+  );
+  return rows;
+}
+
+export async function getCatalogPackage(
+  db: Db,
+  packageName: string
+): Promise<CatalogRow | null> {
+  const { rows } = await db.query<CatalogRow>(
+    `select ${CATALOG_COLUMNS} from catalog_packages where package = $1`,
+    [packageName]
+  );
+  return rows[0] ?? null;
+}
