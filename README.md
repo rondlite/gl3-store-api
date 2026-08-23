@@ -63,6 +63,28 @@ secret between this service and the registry. There is no end-user-facing auth h
 | POST | `/v1/admin/catalog` | `{package, position}` | `201` / `400` |
 | DELETE | `/v1/admin/catalog/:package` | — | `200` / `404` |
 
+The plaintext token is returned by the mint call and never again — only a SHA-256 hash
+is stored. (A high-entropy random token does not need a slow KDF; there is nothing to
+brute-force offline.)
+
+`package` on an entitlement must be either an exact name (`@gl3-plugins/plugin-a`) or the scope
+wildcard `@gl3-plugins/*` for an all-access plan. Anything else is a 400. Keeping it to those
+two shapes makes authorization an equality lookup instead of pattern matching per
+request.
+
+An entitlement also carries an `access` level, `download` (the default) or
+`metadata`. A `metadata` entitlement reads manifests but is refused tarballs, which
+is what lets the storefront list the catalogue with a credential that cannot download
+a single paid plugin. `tarball` on `/v1/auth/authorize-package` defaults to **true**
+when absent, so a registry too old to send it fails closed.
+
+Resolution order is: staff roles first (they bypass entitlements entirely so a
+publisher is not blind to what they just published), then any `download` grant, then
+`metadata`. A `download` grant beats a `metadata` one, because `grantingPatterns`
+matches both the exact name and the scope wildcard and a user can hold one row of
+each. A missing or disabled user, or a user with no live matching entitlement,
+resolves to `not_entitled`.
+
 ### Catalogue
 
 The website's package directory. `POST /v1/admin/catalog` curates the list — the
@@ -92,28 +114,6 @@ curl -sX POST localhost:8080/v1/admin/catalog \
   -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
   -d '{"package":"@gl3-plugins/plugin-a","position":10}'
 ```
-
-The plaintext token is returned by the mint call and never again — only a SHA-256 hash
-is stored. (A high-entropy random token does not need a slow KDF; there is nothing to
-brute-force offline.)
-
-`package` on an entitlement must be either an exact name (`@gl3-plugins/plugin-a`) or the scope
-wildcard `@gl3-plugins/*` for an all-access plan. Anything else is a 400. Keeping it to those
-two shapes makes authorization an equality lookup instead of pattern matching per
-request.
-
-An entitlement also carries an `access` level, `download` (the default) or
-`metadata`. A `metadata` entitlement reads manifests but is refused tarballs, which
-is what lets the storefront list the catalogue with a credential that cannot download
-a single paid plugin. `tarball` on `/v1/auth/authorize-package` defaults to **true**
-when absent, so a registry too old to send it fails closed.
-
-Resolution order is: staff roles first (they bypass entitlements entirely so a
-publisher is not blind to what they just published), then any `download` grant, then
-`metadata`. A `download` grant beats a `metadata` one, because `grantingPatterns`
-matches both the exact name and the scope wildcard and a user can hold one row of
-each. A missing or disabled user, or a user with no live matching entitlement,
-resolves to `not_entitled`.
 
 ## Development
 

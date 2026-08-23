@@ -24,6 +24,7 @@ describe('loadEnv registry settings', () => {
     });
     expect(env.REGISTRY_URL).toBe('https://npm.gl3.dev');
     expect(env.REGISTRY_USERNAME).toBe('storefront');
+    expect(env.REGISTRY_TOKEN).toBe('gl3_abc');
     expect(env.REGISTRY_REFRESH_MS).toBe(60_000);
   });
 
