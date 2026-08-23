@@ -16,7 +16,7 @@ npm install @gl3-plugins/plugin-a
 
 ## How auth works end to end
 
-1. A user runs `npm login --registry https://registry.gl3.dev` and pastes a token issued
+1. A user runs `npm login --registry https://npm.gl3.dev` and pastes a token issued
    by this service (`gl3_...`) as the password.
 2. Verdaccio calls the plugin's `authenticate`, which POSTs to `/v1/auth/authenticate`.
    The response's `groups` become the user's Verdaccio groups, plus a synthetic
@@ -80,7 +80,8 @@ Resolution order is: staff roles first (they bypass entitlements entirely so a
 publisher is not blind to what they just published), then any `download` grant, then
 `metadata`. A `download` grant beats a `metadata` one, because `grantingPatterns`
 matches both the exact name and the scope wildcard and a user can hold one row of
-each.
+each. A missing or disabled user, or a user with no live matching entitlement,
+resolves to `not_entitled`.
 
 ## Development
 
