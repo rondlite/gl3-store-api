@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
-import { setupHarness } from './helpers.js';
+import { createApp } from '../src/app.js';
+import type { Logger } from '../src/log.js';
+import { INTERNAL_API_KEY, setupHarness } from './helpers.js';
 
 const h = setupHarness();
+
+type CapturedLog = { level: string; msg: string; fields?: Record<string, unknown> };
+
+/** A logger that records calls instead of dropping them, for assertions. */
+function capturingLogger(): { logger: Logger; logs: CapturedLog[] } {
+  const logs: CapturedLog[] = [];
+  const record =
+    (level: string) =>
+    (msg: string, fields?: Record<string, unknown>): void => {
+      logs.push({ level, msg, ...(fields !== undefined ? { fields } : {}) });
+    };
+  return {
+    logs,
+    logger: { debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') },
+  };
+}
 
 async function seedUser(username = 'ron'): Promise<string> {
   const res = await h.call('/v1/admin/users', {
@@ -192,6 +210,66 @@ describe('entitlement access level', () => {
     const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
     expect(rows).toEqual([{ access: 'download' }]);
   });
+
+  it('warns when a metadata grant is issued to a staff user', async () => {
+    // Staff bypass entitlements entirely, so this grant would be silently
+    // inert -- the precise misconfiguration the spec calls fatal.
+    const adminRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'boss', email: 'boss@gl3.dev', roles: ['admin'] }),
+    });
+    const { userId } = (await adminRes.json()) as { userId: string };
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request(`http://test/v1/admin/users/${userId}/entitlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ package: '@gl3-plugins/*', access: 'metadata' }),
+    });
+
+    expect(res.status).toBe(201);
+    const entry = logs.find((l) => l.msg === 'metadata_grant_to_staff');
+    expect(entry).toBeDefined();
+    expect(entry?.fields).toMatchObject({ userId, package: '@gl3-plugins/*' });
+  });
+
+  it('does not warn on a metadata grant to a non-staff user', async () => {
+    const userId = await seedUser();
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request(`http://test/v1/admin/users/${userId}/entitlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ package: '@gl3-plugins/*', access: 'metadata' }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(logs.find((l) => l.msg === 'metadata_grant_to_staff')).toBeUndefined();
+  });
+
+  it('does not warn on a download grant to a staff user', async () => {
+    const adminRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'boss2', email: 'boss2@gl3.dev', roles: ['admin'] }),
+    });
+    const { userId } = (await adminRes.json()) as { userId: string };
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request(`http://test/v1/admin/users/${userId}/entitlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ package: '@gl3-plugins/*', access: 'download' }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(logs.find((l) => l.msg === 'metadata_grant_to_staff')).toBeUndefined();
+  });
 });
 
 describe('metadata-only entitlements', () => {
@@ -262,5 +340,41 @@ describe('metadata-only entitlements', () => {
     const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', false);
     expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({ error: 'not_entitled' });
+  });
+
+  it('logs the metadata_only decision so it is diagnosable', async () => {
+    // Without this, a misconfigured key presents identically to an unpaid
+    // customer in the logs -- the whole reason metadata_only is a distinct code.
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request('http://test/v1/auth/authorize-package', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ userId, package: '@gl3-plugins/plugin-a', tarball: true }),
+    });
+    expect(res.status).toBe(403);
+
+    const entry = logs.find((l) => l.msg === 'metadata_only');
+    expect(entry).toBeDefined();
+    expect(entry?.fields).toMatchObject({ userId, package: '@gl3-plugins/plugin-a' });
+  });
+
+  it('does not log metadata_only for an ordinary not_entitled denial', async () => {
+    const userId = await seedUser();
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request('http://test/v1/auth/authorize-package', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ userId, package: '@gl3-plugins/plugin-a' }),
+    });
+    expect(res.status).toBe(403);
+    expect(logs.find((l) => l.msg === 'metadata_only')).toBeUndefined();
   });
 });

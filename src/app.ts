@@ -13,6 +13,7 @@ import {
   createUser,
   type EntitlementAccess,
   grantEntitlement,
+  hasStaffRole,
   revokeEntitlement,
   revokeToken,
 } from './service.js';
@@ -136,6 +137,11 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
         return c.json({ ok: true });
       }
       if (decision === 'metadata_only') {
+        // Distinct from the request-logging middleware above by design: that one
+        // deliberately never logs bodies. This is the diagnostic the spec asks
+        // for -- without it, a misconfigured metadata key is indistinguishable
+        // from an unpaid customer in the logs.
+        logger.warn('metadata_only', { userId: body.userId, package: body.package });
         return c.json({ error: 'metadata_only' }, 403);
       }
       return c.json({ error: 'not_entitled' }, 403);
@@ -232,14 +238,25 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
         );
       }
 
+      const userId = c.req.param('userId');
+
       try {
         await grantEntitlement(db, {
-          userId: c.req.param('userId'),
+          userId,
           package: body.package,
           ...(body.access !== undefined ? { access: body.access as EntitlementAccess } : {}),
           ...(body.source !== undefined ? { source: body.source } : {}),
           ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt } : {}),
         });
+
+        // Staff bypass entitlements entirely (see authorizePackage), so this
+        // grant is inert -- the account already downloads every paid package
+        // unconditionally. Warn only: rejecting would be new API behaviour the
+        // spec does not define, and could block a legitimate operator flow.
+        if (body.access === 'metadata' && (await hasStaffRole(db, userId))) {
+          logger.warn('metadata_grant_to_staff', { userId, package: body.package });
+        }
+
         return c.json({ ok: true }, 201);
       } catch (err) {
         if ((err as { code?: string }).code === '23503') {

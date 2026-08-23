@@ -74,6 +74,22 @@ export async function authenticate(
  */
 const STAFF_ROLES = ['admin', 'gl3-dev-lead'];
 
+/**
+ * Whether a user holds one of the roles that bypass entitlements entirely (see
+ * STAFF_ROLES). Used to warn an operator granting a `metadata` entitlement to
+ * such a user -- the grant would be silently inert, since staff already read
+ * and download every paid package unconditionally.
+ */
+export async function hasStaffRole(db: Db, userId: string): Promise<boolean> {
+  const { rows } = await db.query<{ is_staff: boolean }>(
+    `select exists (
+       select 1 from user_roles where user_id = $1 and role = any($2::text[])
+     ) as is_staff`,
+    [userId, STAFF_ROLES]
+  );
+  return rows[0]?.is_staff ?? false;
+}
+
 export type PackageDecision = 'ok' | 'metadata_only' | 'not_entitled';
 
 /**
