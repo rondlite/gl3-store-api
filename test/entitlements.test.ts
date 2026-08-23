@@ -20,6 +20,13 @@ function authorize(userId: string, pkg: string) {
   });
 }
 
+function authorizeTarball(userId: string, pkg: string, tarball: boolean) {
+  return h.call('/v1/auth/authorize-package', {
+    method: 'POST',
+    body: JSON.stringify({ userId, package: pkg, tarball }),
+  });
+}
+
 function grant(userId: string, body: Record<string, unknown>) {
   return h.call(`/v1/admin/users/${userId}/entitlements`, {
     method: 'POST',
@@ -184,5 +191,76 @@ describe('entitlement access level', () => {
 
     const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
     expect(rows).toEqual([{ access: 'download' }]);
+  });
+});
+
+describe('metadata-only entitlements', () => {
+  it('allows a manifest read', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', false);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it('denies a tarball download', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', true);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'metadata_only' });
+  });
+
+  it('denies when the tarball field is missing entirely', async () => {
+    // Fail closed. An unpatched registry sends no flag, and guessing "manifest"
+    // there would hand every paid tarball to the storefront key.
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const res = await authorize(userId, '@gl3-plugins/plugin-a');
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'metadata_only' });
+  });
+
+  it('leaves a download entitlement able to fetch tarballs', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*' });
+
+    expect((await authorizeTarball(userId, '@gl3-plugins/plugin-a', true)).status).toBe(200);
+  });
+
+  it('lets a download grant win over a metadata grant on the same package', async () => {
+    // grantingPatterns matches the exact name and the wildcard, and the primary
+    // key is (user_id, package), so a user can hold one of each. The more
+    // permissive must win or buying a plugin would be undone by a metadata grant.
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'download' });
+
+    expect((await authorizeTarball(userId, '@gl3-plugins/plugin-a', true)).status).toBe(200);
+  });
+
+  it('keeps staff downloading without any entitlement row', async () => {
+    const userId = await seedUser('publisher');
+    await h.db.query("insert into user_roles (user_id, role) values ($1, 'gl3-dev-lead')", [
+      userId,
+    ]);
+
+    expect((await authorizeTarball(userId, '@gl3-plugins/plugin-a', true)).status).toBe(200);
+  });
+
+  it('denies a metadata grant that has been revoked', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+    await h.call(`/v1/admin/users/${userId}/entitlements`, {
+      method: 'DELETE',
+      body: JSON.stringify({ package: '@gl3-plugins/*' }),
+    });
+
+    const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', false);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'not_entitled' });
   });
 });

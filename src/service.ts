@@ -74,37 +74,63 @@ export async function authenticate(
  */
 const STAFF_ROLES = ['admin', 'gl3-dev-lead'];
 
+export type PackageDecision = 'ok' | 'metadata_only' | 'not_entitled';
+
 /**
- * True if the user currently holds a live entitlement covering the package,
- * or is staff.
+ * Resolves what a user may do with a package right now.
+ *
+ * Order matters. Staff bypass entitlements entirely, and a download grant beats
+ * a metadata one: `grantingPatterns` matches both the exact name and the scope
+ * wildcard, so a user can hold one row of each and the permissive one has to win.
+ *
+ * An `access` value that is neither string matches neither branch and lands on
+ * `not_entitled` -- unknown means denied, not granted.
  */
 export async function authorizePackage(
   db: Db,
-  input: { userId: string; package: string }
-): Promise<boolean> {
-  const { rows } = await db.query<{ ok: boolean }>(
-    `select true as ok
+  input: { userId: string; package: string; tarball: boolean }
+): Promise<PackageDecision> {
+  const { rows } = await db.query<{ staff: boolean; download: boolean; metadata: boolean }>(
+    `select
+       exists (
+         select 1 from user_roles r
+          where r.user_id = u.id
+            and r.role = any($3::text[])
+       ) as staff,
+       exists (
+         select 1 from entitlements e
+          where e.user_id = u.id
+            and e.package = any($2::text[])
+            and e.revoked_at is null
+            and (e.expires_at is null or e.expires_at > now())
+            and e.access = 'download'
+       ) as download,
+       exists (
+         select 1 from entitlements e
+          where e.user_id = u.id
+            and e.package = any($2::text[])
+            and e.revoked_at is null
+            and (e.expires_at is null or e.expires_at > now())
+            and e.access = 'metadata'
+       ) as metadata
        from users u
       where u.id = $1
         and u.disabled_at is null
-        and (
-          exists (
-            select 1 from user_roles r
-             where r.user_id = u.id and r.role = any($3::text[])
-          )
-          or exists (
-            select 1 from entitlements e
-             where e.user_id = u.id
-               and e.package = any($2::text[])
-               and e.revoked_at is null
-               and (e.expires_at is null or e.expires_at > now())
-          )
-        )
       limit 1`,
     [input.userId, grantingPatterns(input.package), STAFF_ROLES]
   );
 
-  return rows.length > 0;
+  const row = rows[0];
+  if (!row) {
+    return 'not_entitled';
+  }
+  if (row.staff || row.download) {
+    return 'ok';
+  }
+  if (row.metadata) {
+    return input.tarball ? 'metadata_only' : 'ok';
+  }
+  return 'not_entitled';
 }
 
 export async function createUser(
