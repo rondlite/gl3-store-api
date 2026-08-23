@@ -28,11 +28,21 @@ export async function refreshCatalog(
   fetchManifest: FetchManifest,
   logger: Logger
 ): Promise<RefreshResult> {
-  const { rows } = await db.query<{ package: string }>(
-    'select package from catalog_packages order by position, package'
-  );
-
   const result: RefreshResult = { refreshed: 0, failed: 0, skipped: 0 };
+
+  let rows: { package: string }[];
+  try {
+    const queryResult = await db.query<{ package: string }>(
+      'select package from catalog_packages order by position, package'
+    );
+    rows = queryResult.rows;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('catalog refresh failed to list packages', { err: message });
+    // Database unreachable is a blip, not a failure: return zero counts and let
+    // the next pass try again. Do not throw.
+    return result;
+  }
 
   for (const { package: packageName } of rows) {
     try {
@@ -92,6 +102,10 @@ export async function refreshCatalog(
  *
  * The first pass is scheduled rather than awaited so a slow or unreachable
  * registry cannot delay the service becoming healthy. Returns a stop function.
+ *
+ * Uses setTimeout chaining instead of setInterval to prevent overlapping passes:
+ * a pass runs, and when it completes schedules the next one intervalMs later.
+ * This makes overlap structurally impossible even with a slow registry.
  */
 export function startCatalogRefresh(
   db: Db,
@@ -99,21 +113,39 @@ export function startCatalogRefresh(
   logger: Logger,
   intervalMs: number
 ): () => void {
-  const pass = (): void => {
-    void refreshCatalog(db, fetchManifest, logger).then((result) => {
-      logger.info('catalog refreshed', result);
-    });
+  let stopped = false;
+  let pending: NodeJS.Timeout | null = null;
+
+  const scheduleNext = (delayMs: number): void => {
+    if (stopped) {
+      return;
+    }
+    pending = setTimeout(() => {
+      // Run the pass and schedule the next one when it finishes, so passes
+      // never overlap even with a slow registry.
+      void refreshCatalog(db, fetchManifest, logger)
+        .then((result) => {
+          logger.info('catalog refreshed', result);
+          scheduleNext(intervalMs);
+        })
+        .catch((err) => {
+          // Catch any rejection so nothing can escape the timer callback and
+          // become unhandled. Schedule the next pass regardless.
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error('catalog refresh crashed', { err: message });
+          scheduleNext(intervalMs);
+        });
+    }, delayMs);
+    pending.unref();
   };
 
-  const first = setTimeout(pass, 1000);
-  const timer = setInterval(pass, intervalMs);
-
-  // Neither timer should hold the process open at shutdown.
-  first.unref();
-  timer.unref();
+  scheduleNext(1000);
 
   return () => {
-    clearTimeout(first);
-    clearInterval(timer);
+    stopped = true;
+    if (pending) {
+      clearTimeout(pending);
+      pending = null;
+    }
   };
 }

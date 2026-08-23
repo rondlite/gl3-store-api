@@ -128,4 +128,19 @@ describe('refreshCatalog', () => {
       skipped: 0,
     });
   });
+
+  it('resolves with zero counts when database query fails', async () => {
+    // Critical: refreshCatalog must never throw, even when listing packages fails.
+    // A stub object cast to Db type lets us make the query reject on demand without
+    // a real SQL error. This tests our error handling, not the database itself.
+    const failingDb = {
+      query: async () => {
+        throw new Error('connection timeout');
+      },
+    } as unknown as typeof h.db;
+
+    const result = await refreshCatalog(failingDb, async () => MANIFEST, silentLogger());
+
+    expect(result).toEqual({ refreshed: 0, failed: 0, skipped: 0 });
+  });
 });
