@@ -38,3 +38,34 @@ export function isSellablePackage(name: string): boolean {
 export function grantingPatterns(packageName: string): string[] {
   return [packageName, `${SCOPE}*`];
 }
+
+/**
+ * The public scope: the SDK and anything else given away. Readable by anyone
+ * straight from the registry, and never entitlement-checked.
+ */
+export const PUBLIC_SCOPE = '@gl3/';
+
+const CATALOG_NAME = /^@gl3(-plugins)?\/[a-z0-9][a-z0-9._-]*$/;
+
+/**
+ * A package name allowed in the website's catalogue: either GL3 scope.
+ *
+ * Deliberately separate from `isSellablePackage`. The catalogue is a display
+ * list and spans both scopes; entitlement checks are a security boundary and
+ * must keep rejecting the free scope.
+ */
+export function isCatalogPackage(name: string): boolean {
+  return CATALOG_NAME.test(name);
+}
+
+/**
+ * True for names in the paid scope.
+ *
+ * Derived rather than stored, so it cannot drift from the name. The assumption
+ * is that everything under the paid scope is paid, which Verdaccio's
+ * `public_packages` setting could falsify by freeing a name inside that scope
+ * without renaming it. That list is empty today.
+ */
+export function isPaidPackage(name: string): boolean {
+  return name.startsWith(SCOPE);
+}

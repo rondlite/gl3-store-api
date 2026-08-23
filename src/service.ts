@@ -256,3 +256,23 @@ export async function revokeEntitlement(
   );
   return (rowCount ?? 0) > 0;
 }
+
+export async function addCatalogPackage(
+  db: Db,
+  input: { package: string; position: number }
+): Promise<void> {
+  // Upsert so the same call both adds a package and moves an existing one.
+  await db.query(
+    `insert into catalog_packages (package, position)
+          values ($1, $2)
+     on conflict (package) do update set position = excluded.position`,
+    [input.package, input.position]
+  );
+}
+
+export async function removeCatalogPackage(db: Db, packageName: string): Promise<boolean> {
+  const { rowCount } = await db.query('delete from catalog_packages where package = $1', [
+    packageName,
+  ]);
+  return (rowCount ?? 0) > 0;
+}

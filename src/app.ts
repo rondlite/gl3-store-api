@@ -5,8 +5,9 @@ import { z } from 'zod';
 
 import type { Db } from './db.js';
 import { type Logger, silentLogger } from './log.js';
-import { SCOPE, isSellablePackage, parsePattern } from './packages.js';
+import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isSellablePackage, parsePattern } from './packages.js';
 import {
+  addCatalogPackage,
   authenticate,
   authorizePackage,
   createTokenForUser,
@@ -14,6 +15,7 @@ import {
   type EntitlementAccess,
   grantEntitlement,
   hasStaffRole,
+  removeCatalogPackage,
   revokeEntitlement,
   revokeToken,
 } from './service.js';
@@ -278,6 +280,32 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
       return revoked ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404);
     }
   );
+
+  app.post(
+    '/v1/admin/catalog',
+    zValidator('json', z.object({ package: z.string().min(1), position: z.number().int() })),
+    async (c) => {
+      const body = c.req.valid('json');
+
+      if (!isCatalogPackage(body.package)) {
+        return c.json(
+          {
+            error: 'invalid_package',
+            message: `expected "${SCOPE}name" or "${PUBLIC_SCOPE}name"`,
+          },
+          400
+        );
+      }
+
+      await addCatalogPackage(db, body);
+      return c.json({ ok: true }, 201);
+    }
+  );
+
+  app.delete('/v1/admin/catalog/:package', async (c) => {
+    const removed = await removeCatalogPackage(db, c.req.param('package'));
+    return removed ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404);
+  });
 
   return app;
 }
