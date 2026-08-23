@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+/**
+ * Default for REGISTRY_REFRESH_MS, also used by the app factory's
+ * `catalogStaleMs` default so the two cannot silently disagree.
+ */
+export const DEFAULT_REGISTRY_REFRESH_MS = 900_000;
+
 const schema = z.object({
   DATABASE_URL: z.string().min(1),
   // Shared secret the Verdaccio plugin sends as `Authorization: Bearer <key>`.
@@ -19,7 +25,7 @@ const schema = z.object({
     .optional(),
   REGISTRY_USERNAME: z.string().min(1).optional(),
   REGISTRY_TOKEN: z.string().min(1).optional(),
-  REGISTRY_REFRESH_MS: z.coerce.number().int().positive().default(900_000),
+  REGISTRY_REFRESH_MS: z.coerce.number().int().positive().default(DEFAULT_REGISTRY_REFRESH_MS),
 });
 
 export type Env = z.infer<typeof schema>;

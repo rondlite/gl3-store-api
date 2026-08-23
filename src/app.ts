@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 
 import type { Db } from './db.js';
+import { DEFAULT_REGISTRY_REFRESH_MS } from './env.js';
 import { type Logger, silentLogger } from './log.js';
 import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isPaidPackage, isSellablePackage, parsePattern } from './packages.js';
 import {
@@ -79,7 +80,7 @@ export function createApp({
   db,
   internalApiKey,
   logger = silentLogger(),
-  catalogStaleMs = 2 * 900_000,
+  catalogStaleMs = 2 * DEFAULT_REGISTRY_REFRESH_MS,
 }: AppDeps) {
   const app = new Hono();
 
@@ -345,7 +346,18 @@ export function createApp({
   );
 
   app.delete('/v1/admin/catalog/:package', async (c) => {
-    const removed = await removeCatalogPackage(db, c.req.param('package'));
+    const packageName = c.req.param('package');
+    if (!isCatalogPackage(packageName)) {
+      return c.json(
+        {
+          error: 'invalid_package',
+          message: `expected "${SCOPE}name" or "${PUBLIC_SCOPE}name"`,
+        },
+        400
+      );
+    }
+
+    const removed = await removeCatalogPackage(db, packageName);
     return removed ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404);
   });
 
@@ -357,7 +369,18 @@ export function createApp({
   });
 
   app.get('/v1/catalog/packages/:package', async (c) => {
-    const row = await getCatalogPackage(db, c.req.param('package'));
+    const packageName = c.req.param('package');
+    if (!isCatalogPackage(packageName)) {
+      return c.json(
+        {
+          error: 'invalid_package',
+          message: `expected "${SCOPE}name" or "${PUBLIC_SCOPE}name"`,
+        },
+        400
+      );
+    }
+
+    const row = await getCatalogPackage(db, packageName);
     return row === null
       ? c.json({ error: 'not_found' }, 404)
       : c.json(presentCatalogRow(row, catalogStaleMs, true));

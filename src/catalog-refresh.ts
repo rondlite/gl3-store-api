@@ -49,9 +49,11 @@ export async function refreshCatalog(
       const manifest = await fetchManifest(packageName);
 
       if (manifest === null) {
-        // Curated but not published yet. Keep whatever we had.
+        // Curated but not published yet. Keep the cached metadata columns, but
+        // do stamp fetched_at: it distinguishes "the refresher ran and this
+        // package genuinely is not published" from "the refresher never ran".
         await db.query(
-          "update catalog_packages set fetch_error = 'not_published' where package = $1",
+          "update catalog_packages set fetched_at = now(), fetch_error = 'not_published' where package = $1",
           [packageName]
         );
         result.skipped += 1;

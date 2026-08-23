@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { refreshCatalog } from '../src/catalog-refresh.js';
+import { refreshCatalog, startCatalogRefresh } from '../src/catalog-refresh.js';
 import { silentLogger } from '../src/log.js';
 import type { Manifest } from '../src/registry.js';
 import { setupHarness } from './helpers.js';
@@ -86,6 +86,25 @@ describe('refreshCatalog', () => {
     expect(r.fetch_error).toBe('not_published');
   });
 
+  it('stamps fetched_at on a 404, distinguishing "checked, not published" from "never ran"', async () => {
+    await catalogue('@gl3-plugins/a');
+
+    await refreshCatalog(h.db, async () => null, silentLogger());
+
+    const r = await row('@gl3-plugins/a');
+    expect(r.fetched_at).not.toBeNull();
+    expect(r.fetch_error).toBe('not_published');
+  });
+
+  it('stays stale on a 404 even though fetched_at was just stamped', async () => {
+    await catalogue('@gl3-plugins/a');
+    await refreshCatalog(h.db, async () => null, silentLogger());
+
+    const res = await h.call('/v1/catalog/packages');
+    const { packages } = (await res.json()) as { packages: { stale: boolean }[] };
+    expect(packages[0].stale).toBe(true);
+  });
+
   it('one failure does not abort the pass', async () => {
     await catalogue('@gl3-plugins/a', 1);
     await catalogue('@gl3-plugins/b', 2);
@@ -126,6 +145,59 @@ describe('refreshCatalog', () => {
       refreshed: 0,
       failed: 0,
       skipped: 0,
+    });
+  });
+
+  describe('startCatalogRefresh / stop', () => {
+    // Captured before useFakeTimers() replaces the global: refreshCatalog does
+    // a real Postgres round trip per pass, and that I/O settles on the real
+    // event loop, not on vitest's virtual clock. advanceTimersByTimeAsync
+    // alone only flushes microtasks -- it does not give the real socket
+    // callback a turn -- so each advance is interleaved with a short real
+    // wait to let the previous pass's DB query actually resolve before the
+    // next advance (or the final assertion) runs. Without this, `calls`
+    // silently stayed at 0 forever, having nothing to do with stop() at all.
+    const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const realWait = (ms: number) => new Promise((resolve) => realSetTimeout(resolve, ms));
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('stops scheduling further passes once stop() is called', async () => {
+      await catalogue('@gl3-plugins/a');
+
+      vi.useFakeTimers();
+      let calls = 0;
+      const stop = startCatalogRefresh(
+        h.db,
+        async () => {
+          calls += 1;
+          return MANIFEST;
+        },
+        silentLogger(),
+        100
+      );
+
+      // The first pass fires ~1s after boot; each following pass intervalMs
+      // later. Advance through several passes so the count is unambiguously
+      // still climbing before stop() is called.
+      await vi.advanceTimersByTimeAsync(1000);
+      await realWait(20);
+      for (let i = 0; i < 6; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+        await realWait(20);
+      }
+      const callsBeforeStop = calls;
+      expect(callsBeforeStop).toBeGreaterThanOrEqual(3);
+
+      stop();
+
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(1000);
+        await realWait(20);
+      }
+      expect(calls).toBe(callsBeforeStop);
     });
   });
 

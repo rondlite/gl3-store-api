@@ -62,6 +62,14 @@ describe('DELETE /v1/admin/catalog/:package', () => {
     );
     expect(res.status).toBe(404);
   });
+
+  it('400s on a name outside both GL3 scopes, rather than 404', async () => {
+    const res = await h.call(`/v1/admin/catalog/${encodeURIComponent('lodash')}`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_package' });
+  });
 });
 
 describe('entitlement validators stay narrow', () => {
@@ -232,5 +240,18 @@ describe('GET /v1/catalog/packages/:package', () => {
       `/v1/catalog/packages/${encodeURIComponent('@gl3-plugins/missing')}`
     );
     expect(res.status).toBe(404);
+  });
+
+  it('400s on a name outside both GL3 scopes, rather than 404', async () => {
+    const res = await h.call(`/v1/catalog/packages/${encodeURIComponent('lodash')}`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_package' });
+  });
+});
+
+describe('internal API key', () => {
+  it('rejects a request with no key', async () => {
+    const res = await h.call('/v1/catalog/packages', { key: null });
+    expect(res.status).toBe(401);
   });
 });

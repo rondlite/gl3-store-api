@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 export type Manifest = {
   version: string;
   description?: string;
@@ -13,11 +15,29 @@ export type RegistryConfig = {
   timeoutMs: number;
 };
 
-type ManifestDocument = {
-  'dist-tags'?: { latest?: string };
-  versions?: Record<string, { description?: string; keywords?: string[]; license?: string }>;
-  readme?: string;
-};
+/**
+ * A manifest is authored by whoever published the package, not by the
+ * registry, and two legacy-but-common npm shapes violate the types below:
+ * `keywords` as a comma-separated string instead of an array, and `license`
+ * as the pre-SPDX `{type, url}` object instead of a string. Each field
+ * `.catch()`es back to undefined on a type mismatch rather than failing the
+ * whole parse, so a package with a malformed field still gets its other
+ * fields cached instead of failing identically on every future pass.
+ */
+const versionEntrySchema = z.object({
+  description: z.string().optional().catch(undefined),
+  keywords: z.array(z.string()).optional().catch(undefined),
+  license: z.string().optional().catch(undefined),
+});
+
+const manifestDocumentSchema = z.object({
+  'dist-tags': z
+    .object({ latest: z.string().optional().catch(undefined) })
+    .optional()
+    .catch(undefined),
+  versions: z.record(z.string(), z.unknown()).optional().catch(undefined),
+  readme: z.string().optional().catch(undefined),
+});
 
 /**
  * Fetches a package manifest from the GL3 registry.
@@ -50,16 +70,27 @@ export async function fetchManifest(
     throw new Error(`registry responded ${response.status} for ${packageName}`);
   }
 
-  const doc = (await response.json()) as ManifestDocument;
+  const parsedDoc = manifestDocumentSchema.safeParse(await response.json());
+  if (!parsedDoc.success) {
+    throw new Error(`registry returned an unexpected manifest shape for ${packageName}`);
+  }
+  const doc = parsedDoc.data;
+
   const latest = doc['dist-tags']?.latest;
   if (latest === undefined) {
     throw new Error(`registry returned no dist-tags.latest for ${packageName}`);
   }
 
-  const version = doc.versions?.[latest];
-  if (version === undefined) {
+  const rawVersion = doc.versions?.[latest];
+  if (rawVersion === undefined) {
     throw new Error(`registry returned no version ${latest} for ${packageName}`);
   }
+
+  const parsedVersion = versionEntrySchema.safeParse(rawVersion);
+  if (!parsedVersion.success) {
+    throw new Error(`registry returned a malformed version ${latest} for ${packageName}`);
+  }
+  const version = parsedVersion.data;
 
   return {
     version: latest,

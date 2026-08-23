@@ -101,4 +101,67 @@ describe('fetchManifest', () => {
     }));
     await expect(fetchManifest(config, '@gl3-plugins/plugin-a')).rejects.toThrow(/latest/);
   });
+
+  it('throws when dist-tags.latest names a version absent from versions', async () => {
+    const config = await startRegistry(() => ({
+      status: 200,
+      body: { name: 'x', 'dist-tags': { latest: '9.9.9' }, versions: { '1.0.0': {} } },
+    }));
+    await expect(fetchManifest(config, '@gl3-plugins/plugin-a')).rejects.toThrow(/9\.9\.9/);
+  });
+
+  it('drops a string keywords field but keeps the rest of the version', async () => {
+    // A legacy manifest shape: keywords as a comma-separated string instead of
+    // an array. Written straight through this would hit a text[] column and
+    // fail with a Postgres "malformed array literal" on every future pass.
+    const config = await startRegistry(() => ({
+      status: 200,
+      body: {
+        name: 'x',
+        'dist-tags': { latest: '1.0.0' },
+        readme: '# plugin-a',
+        versions: {
+          '1.0.0': {
+            description: 'a paid plugin',
+            keywords: 'gl3, plugin',
+            license: 'UNLICENSED',
+          },
+        },
+      },
+    }));
+
+    const manifest = await fetchManifest(config, '@gl3-plugins/plugin-a');
+    expect(manifest).toEqual({
+      version: '1.0.0',
+      description: 'a paid plugin',
+      license: 'UNLICENSED',
+      readme: '# plugin-a',
+    });
+  });
+
+  it('drops an object-shaped license field but keeps the rest of the version', async () => {
+    // The pre-SPDX license shape. Cast straight through, pg stringifies the
+    // object and the website ends up displaying it as the licence text.
+    const config = await startRegistry(() => ({
+      status: 200,
+      body: {
+        name: 'x',
+        'dist-tags': { latest: '1.0.0' },
+        versions: {
+          '1.0.0': {
+            description: 'a paid plugin',
+            keywords: ['gl3'],
+            license: { type: 'MIT', url: 'https://example.com/license' },
+          },
+        },
+      },
+    }));
+
+    const manifest = await fetchManifest(config, '@gl3-plugins/plugin-a');
+    expect(manifest).toEqual({
+      version: '1.0.0',
+      description: 'a paid plugin',
+      keywords: ['gl3'],
+    });
+  });
 });
