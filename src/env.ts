@@ -8,6 +8,18 @@ const schema = z.object({
   INTERNAL_API_KEY: z.string().min(32),
   PORT: z.coerce.number().int().positive().default(8080),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  // The website's catalogue reads package metadata from the registry using the
+  // storefront service account. All four are optional: every deployment before
+  // the catalogue existed sets none of them, and an unset registry simply means
+  // the refresher never starts.
+  REGISTRY_URL: z
+    .string()
+    .min(1)
+    .transform((value) => value.replace(/\/+$/, ''))
+    .optional(),
+  REGISTRY_USERNAME: z.string().min(1).optional(),
+  REGISTRY_TOKEN: z.string().min(1).optional(),
+  REGISTRY_REFRESH_MS: z.coerce.number().int().positive().default(900_000),
 });
 
 export type Env = z.infer<typeof schema>;
