@@ -175,6 +175,12 @@ curl -sX POST localhost:8080/v1/admin/users/usr_xxx/entitlements \
   -d '{"package":"@gl3-plugins/*","access":"metadata","source":"storefront"}'
 ```
 
+**Re-granting this entitlement later without `"access":"metadata"` silently promotes it to
+`download`** — the grant route is an upsert and `access` defaults to `download` on every call,
+including a re-grant. Always pass `"access":"metadata"` explicitly when touching this account's
+entitlement again, or the storefront key quietly gains the ability to download every paid
+tarball.
+
 The token is returned once. It becomes `REGISTRY_TOKEN` alongside
 `REGISTRY_USERNAME=storefront` wherever the catalogue is fetched.
 
@@ -182,5 +188,9 @@ Verify it before trusting it — the second call must fail:
 
 ```bash
 npm view @gl3-plugins/plugin-a --registry https://npm.gl3.dev   # succeeds
-npm pack @gl3-plugins/plugin-a --registry https://npm.gl3.dev   # 403 metadata_only
+npm pack @gl3-plugins/plugin-a --registry https://npm.gl3.dev   # 403 (store-api logs metadata_only)
 ```
+
+The npm client never sees the code `metadata_only` — the plugin turns any denial into its own
+`user is not entitled to package ...` message. Check this service's logs for the `metadata_only`
+line to confirm the denial reached this branch rather than `not_entitled`.
