@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
-import { setupHarness } from './helpers.js';
+import { createApp } from '../src/app.js';
+import type { Logger } from '../src/log.js';
+import { INTERNAL_API_KEY, setupHarness } from './helpers.js';
 
 const h = setupHarness();
+
+type CapturedLog = { level: string; msg: string; fields?: Record<string, unknown> };
+
+/** A logger that records calls instead of dropping them, for assertions. */
+function capturingLogger(): { logger: Logger; logs: CapturedLog[] } {
+  const logs: CapturedLog[] = [];
+  const record =
+    (level: string) =>
+    (msg: string, fields?: Record<string, unknown>): void => {
+      logs.push({ level, msg, ...(fields !== undefined ? { fields } : {}) });
+    };
+  return {
+    logs,
+    logger: { debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') },
+  };
+}
 
 async function seedUser(username = 'ron'): Promise<string> {
   const res = await h.call('/v1/admin/users', {
@@ -17,6 +35,13 @@ function authorize(userId: string, pkg: string) {
   return h.call('/v1/auth/authorize-package', {
     method: 'POST',
     body: JSON.stringify({ userId, package: pkg }),
+  });
+}
+
+function authorizeTarball(userId: string, pkg: string, tarball: boolean) {
+  return h.call('/v1/auth/authorize-package', {
+    method: 'POST',
+    body: JSON.stringify({ userId, package: pkg, tarball }),
   });
 }
 
@@ -148,5 +173,208 @@ describe('POST /v1/auth/authorize-package', () => {
     await grant(ron, { package: '@gl3-plugins/plugin-a' });
 
     expect((await authorize(mallory, '@gl3-plugins/plugin-a')).status).toBe(403);
+  });
+});
+
+describe('entitlement access level', () => {
+  it('defaults a grant to download', async () => {
+    const userId = await seedUser();
+    expect((await grant(userId, { package: '@gl3-plugins/plugin-a' })).status).toBe(201);
+
+    const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
+    expect(rows).toEqual([{ access: 'download' }]);
+  });
+
+  it('stores an explicit metadata grant', async () => {
+    const userId = await seedUser();
+    const res = await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+    expect(res.status).toBe(201);
+
+    const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
+    expect(rows).toEqual([{ access: 'metadata' }]);
+  });
+
+  it('rejects an access level that is neither download nor metadata', async () => {
+    const userId = await seedUser();
+    const res = await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'sideways' });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_access' });
+  });
+
+  it('re-granting changes the access level in place', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'metadata' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'download' });
+
+    const { rows } = await h.db.query<{ access: string }>('select access from entitlements');
+    expect(rows).toEqual([{ access: 'download' }]);
+  });
+
+  it('warns when a metadata grant is issued to a staff user', async () => {
+    // Staff bypass entitlements entirely, so this grant would be silently
+    // inert -- the precise misconfiguration the spec calls fatal.
+    const adminRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'boss', email: 'boss@gl3.dev', roles: ['admin'] }),
+    });
+    const { userId } = (await adminRes.json()) as { userId: string };
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request(`http://test/v1/admin/users/${userId}/entitlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ package: '@gl3-plugins/*', access: 'metadata' }),
+    });
+
+    expect(res.status).toBe(201);
+    const entry = logs.find((l) => l.msg === 'metadata_grant_to_staff');
+    expect(entry).toBeDefined();
+    expect(entry?.fields).toMatchObject({ userId, package: '@gl3-plugins/*' });
+  });
+
+  it('does not warn on a metadata grant to a non-staff user', async () => {
+    const userId = await seedUser();
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request(`http://test/v1/admin/users/${userId}/entitlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ package: '@gl3-plugins/*', access: 'metadata' }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(logs.find((l) => l.msg === 'metadata_grant_to_staff')).toBeUndefined();
+  });
+
+  it('does not warn on a download grant to a staff user', async () => {
+    const adminRes = await h.call('/v1/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'boss2', email: 'boss2@gl3.dev', roles: ['admin'] }),
+    });
+    const { userId } = (await adminRes.json()) as { userId: string };
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request(`http://test/v1/admin/users/${userId}/entitlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ package: '@gl3-plugins/*', access: 'download' }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(logs.find((l) => l.msg === 'metadata_grant_to_staff')).toBeUndefined();
+  });
+});
+
+describe('metadata-only entitlements', () => {
+  it('allows a manifest read', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', false);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it('denies a tarball download', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', true);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'metadata_only' });
+  });
+
+  it('denies when the tarball field is missing entirely', async () => {
+    // Fail closed. An unpatched registry sends no flag, and guessing "manifest"
+    // there would hand every paid tarball to the storefront key.
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const res = await authorize(userId, '@gl3-plugins/plugin-a');
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'metadata_only' });
+  });
+
+  it('leaves a download entitlement able to fetch tarballs', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*' });
+
+    expect((await authorizeTarball(userId, '@gl3-plugins/plugin-a', true)).status).toBe(200);
+  });
+
+  it('lets a download grant win over a metadata grant on the same package', async () => {
+    // grantingPatterns matches the exact name and the wildcard, and the primary
+    // key is (user_id, package), so a user can hold one of each. The more
+    // permissive must win or buying a plugin would be undone by a metadata grant.
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+    await grant(userId, { package: '@gl3-plugins/plugin-a', access: 'download' });
+
+    expect((await authorizeTarball(userId, '@gl3-plugins/plugin-a', true)).status).toBe(200);
+  });
+
+  it('keeps staff downloading without any entitlement row', async () => {
+    const userId = await seedUser('publisher');
+    await h.db.query("insert into user_roles (user_id, role) values ($1, 'gl3-dev-lead')", [
+      userId,
+    ]);
+
+    expect((await authorizeTarball(userId, '@gl3-plugins/plugin-a', true)).status).toBe(200);
+  });
+
+  it('denies a metadata grant that has been revoked', async () => {
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+    await h.call(`/v1/admin/users/${userId}/entitlements`, {
+      method: 'DELETE',
+      body: JSON.stringify({ package: '@gl3-plugins/*' }),
+    });
+
+    const res = await authorizeTarball(userId, '@gl3-plugins/plugin-a', false);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'not_entitled' });
+  });
+
+  it('logs the metadata_only decision so it is diagnosable', async () => {
+    // Without this, a misconfigured key presents identically to an unpaid
+    // customer in the logs -- the whole reason metadata_only is a distinct code.
+    const userId = await seedUser();
+    await grant(userId, { package: '@gl3-plugins/*', access: 'metadata' });
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request('http://test/v1/auth/authorize-package', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ userId, package: '@gl3-plugins/plugin-a', tarball: true }),
+    });
+    expect(res.status).toBe(403);
+
+    const entry = logs.find((l) => l.msg === 'metadata_only');
+    expect(entry).toBeDefined();
+    expect(entry?.fields).toMatchObject({ userId, package: '@gl3-plugins/plugin-a' });
+  });
+
+  it('does not log metadata_only for an ordinary not_entitled denial', async () => {
+    const userId = await seedUser();
+
+    const { logger, logs } = capturingLogger();
+    const app = createApp({ db: h.db, internalApiKey: INTERNAL_API_KEY, logger });
+
+    const res = await app.request('http://test/v1/auth/authorize-package', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${INTERNAL_API_KEY}` },
+      body: JSON.stringify({ userId, package: '@gl3-plugins/plugin-a' }),
+    });
+    expect(res.status).toBe(403);
+    expect(logs.find((l) => l.msg === 'metadata_only')).toBeUndefined();
   });
 });

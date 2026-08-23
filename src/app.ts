@@ -11,7 +11,9 @@ import {
   authorizePackage,
   createTokenForUser,
   createUser,
+  type EntitlementAccess,
   grantEntitlement,
+  hasStaffRole,
   revokeEntitlement,
   revokeToken,
 } from './service.js';
@@ -106,7 +108,14 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
 
   app.post(
     '/v1/auth/authorize-package',
-    zValidator('json', z.object({ userId: z.string().min(1), package: z.string().min(1) })),
+    zValidator(
+      'json',
+      z.object({
+        userId: z.string().min(1),
+        package: z.string().min(1),
+        tarball: z.boolean().optional(),
+      })
+    ),
     async (c) => {
       const body = c.req.valid('json');
 
@@ -116,8 +125,26 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
         return c.json({ error: 'not_entitled', reason: 'out_of_scope' }, 403);
       }
 
-      const allowed = await authorizePackage(db, body);
-      return allowed ? c.json({ ok: true }) : c.json({ error: 'not_entitled' }, 403);
+      // Absent means tarball. A registry too old to send the flag must not be
+      // read as "this is only a manifest request".
+      const decision = await authorizePackage(db, {
+        userId: body.userId,
+        package: body.package,
+        tarball: body.tarball ?? true,
+      });
+
+      if (decision === 'ok') {
+        return c.json({ ok: true });
+      }
+      if (decision === 'metadata_only') {
+        // Distinct from the request-logging middleware above by design: that one
+        // deliberately never logs bodies. This is the diagnostic the spec asks
+        // for -- without it, a misconfigured metadata key is indistinguishable
+        // from an unpaid customer in the logs.
+        logger.warn('metadata_only', { userId: body.userId, package: body.package });
+        return c.json({ error: 'metadata_only' }, 403);
+      }
+      return c.json({ error: 'not_entitled' }, 403);
     }
   );
 
@@ -187,6 +214,7 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
       'json',
       z.object({
         package: z.string().min(1),
+        access: z.string().min(1).optional(),
         source: z.string().min(1).optional(),
         expiresAt: z.coerce.date().optional(),
       })
@@ -203,13 +231,32 @@ export function createApp({ db, internalApiKey, logger = silentLogger() }: AppDe
         );
       }
 
+      if (body.access !== undefined && body.access !== 'download' && body.access !== 'metadata') {
+        return c.json(
+          { error: 'invalid_access', message: 'expected "download" or "metadata"' },
+          400
+        );
+      }
+
+      const userId = c.req.param('userId');
+
       try {
         await grantEntitlement(db, {
-          userId: c.req.param('userId'),
+          userId,
           package: body.package,
+          ...(body.access !== undefined ? { access: body.access as EntitlementAccess } : {}),
           ...(body.source !== undefined ? { source: body.source } : {}),
           ...(body.expiresAt !== undefined ? { expiresAt: body.expiresAt } : {}),
         });
+
+        // Staff bypass entitlements entirely (see authorizePackage), so this
+        // grant is inert -- the account already downloads every paid package
+        // unconditionally. Warn only: rejecting would be new API behaviour the
+        // spec does not define, and could block a legitimate operator flow.
+        if (body.access === 'metadata' && (await hasStaffRole(db, userId))) {
+          logger.warn('metadata_grant_to_staff', { userId, package: body.package });
+        }
+
         return c.json({ ok: true }, 201);
       } catch (err) {
         if ((err as { code?: string }).code === '23503') {

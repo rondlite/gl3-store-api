@@ -75,36 +75,78 @@ export async function authenticate(
 const STAFF_ROLES = ['admin', 'gl3-dev-lead'];
 
 /**
- * True if the user currently holds a live entitlement covering the package,
- * or is staff.
+ * Whether a user holds one of the roles that bypass entitlements entirely (see
+ * STAFF_ROLES). Used to warn an operator granting a `metadata` entitlement to
+ * such a user -- the grant would be silently inert, since staff already read
+ * and download every paid package unconditionally.
+ */
+export async function hasStaffRole(db: Db, userId: string): Promise<boolean> {
+  const { rows } = await db.query<{ is_staff: boolean }>(
+    `select exists (
+       select 1 from user_roles where user_id = $1 and role = any($2::text[])
+     ) as is_staff`,
+    [userId, STAFF_ROLES]
+  );
+  return rows[0]?.is_staff ?? false;
+}
+
+export type PackageDecision = 'ok' | 'metadata_only' | 'not_entitled';
+
+/**
+ * Resolves what a user may do with a package right now.
+ *
+ * Order matters. Staff bypass entitlements entirely, and a download grant beats
+ * a metadata one: `grantingPatterns` matches both the exact name and the scope
+ * wildcard, so a user can hold one row of each and the permissive one has to win.
+ *
+ * An `access` value that is neither string matches neither branch and lands on
+ * `not_entitled` -- unknown means denied, not granted.
  */
 export async function authorizePackage(
   db: Db,
-  input: { userId: string; package: string }
-): Promise<boolean> {
-  const { rows } = await db.query<{ ok: boolean }>(
-    `select true as ok
+  input: { userId: string; package: string; tarball: boolean }
+): Promise<PackageDecision> {
+  const { rows } = await db.query<{ staff: boolean; download: boolean; metadata: boolean }>(
+    `select
+       exists (
+         select 1 from user_roles r
+          where r.user_id = u.id
+            and r.role = any($3::text[])
+       ) as staff,
+       exists (
+         select 1 from entitlements e
+          where e.user_id = u.id
+            and e.package = any($2::text[])
+            and e.revoked_at is null
+            and (e.expires_at is null or e.expires_at > now())
+            and e.access = 'download'
+       ) as download,
+       exists (
+         select 1 from entitlements e
+          where e.user_id = u.id
+            and e.package = any($2::text[])
+            and e.revoked_at is null
+            and (e.expires_at is null or e.expires_at > now())
+            and e.access = 'metadata'
+       ) as metadata
        from users u
       where u.id = $1
         and u.disabled_at is null
-        and (
-          exists (
-            select 1 from user_roles r
-             where r.user_id = u.id and r.role = any($3::text[])
-          )
-          or exists (
-            select 1 from entitlements e
-             where e.user_id = u.id
-               and e.package = any($2::text[])
-               and e.revoked_at is null
-               and (e.expires_at is null or e.expires_at > now())
-          )
-        )
       limit 1`,
     [input.userId, grantingPatterns(input.package), STAFF_ROLES]
   );
 
-  return rows.length > 0;
+  const row = rows[0];
+  if (!row) {
+    return 'not_entitled';
+  }
+  if (row.staff || row.download) {
+    return 'ok';
+  }
+  if (row.metadata) {
+    return input.tarball ? 'metadata_only' : 'ok';
+  }
+  return 'not_entitled';
 }
 
 export async function createUser(
@@ -164,25 +206,42 @@ export async function revokeToken(db: Db, tokenId: string): Promise<boolean> {
   return (rowCount ?? 0) > 0;
 }
 
+export type EntitlementAccess = 'download' | 'metadata';
+
 export async function grantEntitlement(
   db: Db,
-  input: { userId: string; package: string; source?: string; expiresAt?: Date }
+  input: {
+    userId: string;
+    package: string;
+    access?: EntitlementAccess;
+    source?: string;
+    expiresAt?: Date;
+  }
 ): Promise<void> {
   if (parsePattern(input.package) === null) {
     throw new Error(`not a grantable package pattern: ${input.package}`);
   }
 
   // Re-granting a previously revoked entitlement should reinstate it, which is
-  // why this is an upsert rather than an insert that conflicts.
+  // why this is an upsert rather than an insert that conflicts. `access` is part
+  // of the update set: re-granting at a different level must move the existing
+  // row rather than silently keep the old level.
   await db.query(
-    `insert into entitlements (user_id, package, source, expires_at)
-          values ($1, $2, $3, $4)
+    `insert into entitlements (user_id, package, access, source, expires_at)
+          values ($1, $2, $3, $4, $5)
      on conflict (user_id, package) do update
             set revoked_at = null,
+                access = excluded.access,
                 source = excluded.source,
                 expires_at = excluded.expires_at,
                 granted_at = now()`,
-    [input.userId, input.package, input.source ?? 'manual', input.expiresAt ?? null]
+    [
+      input.userId,
+      input.package,
+      input.access ?? 'download',
+      input.source ?? 'manual',
+      input.expiresAt ?? null,
+    ]
   );
 }
 

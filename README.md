@@ -16,7 +16,7 @@ npm install @gl3-plugins/plugin-a
 
 ## How auth works end to end
 
-1. A user runs `npm login --registry https://registry.gl3.dev` and pastes a token issued
+1. A user runs `npm login --registry https://npm.gl3.dev` and pastes a token issued
    by this service (`gl3_...`) as the password.
 2. Verdaccio calls the plugin's `authenticate`, which POSTs to `/v1/auth/authenticate`.
    The response's `groups` become the user's Verdaccio groups, plus a synthetic
@@ -49,7 +49,7 @@ secret between this service and the registry. There is no end-user-facing auth h
 | Method | Path | Body | Response |
 | --- | --- | --- | --- |
 | POST | `/v1/auth/authenticate` | `{username, token}` | `200 {userId, username, groups}` / `401` |
-| POST | `/v1/auth/authorize-package` | `{userId, package}` | `200 {ok:true}` / `403 {error:"not_entitled"}` |
+| POST | `/v1/auth/authorize-package` | `{userId, package, tarball?}` | `200 {ok:true}` / `403 {error:"not_entitled"}` / `403 {error:"metadata_only"}` |
 
 ### Admin
 
@@ -58,7 +58,7 @@ secret between this service and the registry. There is no end-user-facing auth h
 | POST | `/v1/admin/users` | `{username, email, roles?}` | `201 {userId, username}` / `409` |
 | POST | `/v1/admin/users/:userId/tokens` | `{name?, expiresAt?}` | `201 {tokenId, token}` / `404` |
 | DELETE | `/v1/admin/tokens/:tokenId` | — | `200` / `404` |
-| POST | `/v1/admin/users/:userId/entitlements` | `{package, source?, expiresAt?}` | `201` / `400` / `404` |
+| POST | `/v1/admin/users/:userId/entitlements` | `{package, access?, source?, expiresAt?}` | `201` / `400` / `404` |
 | DELETE | `/v1/admin/users/:userId/entitlements` | `{package}` | `200` / `404` |
 
 The plaintext token is returned by the mint call and never again — only a SHA-256 hash
@@ -69,6 +69,19 @@ brute-force offline.)
 wildcard `@gl3-plugins/*` for an all-access plan. Anything else is a 400. Keeping it to those
 two shapes makes authorization an equality lookup instead of pattern matching per
 request.
+
+An entitlement also carries an `access` level, `download` (the default) or
+`metadata`. A `metadata` entitlement reads manifests but is refused tarballs, which
+is what lets the storefront list the catalogue with a credential that cannot download
+a single paid plugin. `tarball` on `/v1/auth/authorize-package` defaults to **true**
+when absent, so a registry too old to send it fails closed.
+
+Resolution order is: staff roles first (they bypass entitlements entirely so a
+publisher is not blind to what they just published), then any `download` grant, then
+`metadata`. A `download` grant beats a `metadata` one, because `grantingPatterns`
+matches both the exact name and the scope wildcard and a user can hold one row of
+each. A missing or disabled user, or a user with no live matching entitlement,
+resolves to `not_entitled`.
 
 ## Development
 
@@ -138,3 +151,46 @@ step so a rolling deploy cannot have N replicas racing to alter the schema.
 
 `/healthz` returns 503 when the database is unreachable, so it works as a readiness
 probe.
+
+### The storefront metadata account
+
+The storefront reads the plugin catalogue through an account that can see every
+manifest in the paid scope and download none of them.
+
+```bash
+KEY=$(grep INTERNAL_API_KEY .env | cut -d= -f2)
+
+# roles MUST be empty: a staff role bypasses entitlements entirely and would
+# give this token every tarball.
+curl -sX POST localhost:8080/v1/admin/users \
+  -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"username":"storefront","email":"storefront@gl3.dev","roles":[]}'
+
+curl -sX POST localhost:8080/v1/admin/users/usr_xxx/tokens \
+  -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"name":"catalogue"}'
+
+curl -sX POST localhost:8080/v1/admin/users/usr_xxx/entitlements \
+  -H "authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"package":"@gl3-plugins/*","access":"metadata","source":"storefront"}'
+```
+
+**Re-granting this entitlement later without `"access":"metadata"` silently promotes it to
+`download`** — the grant route is an upsert and `access` defaults to `download` on every call,
+including a re-grant. Always pass `"access":"metadata"` explicitly when touching this account's
+entitlement again, or the storefront key quietly gains the ability to download every paid
+tarball.
+
+The token is returned once. It becomes `REGISTRY_TOKEN` alongside
+`REGISTRY_USERNAME=storefront` wherever the catalogue is fetched.
+
+Verify it before trusting it — the second call must fail:
+
+```bash
+npm view @gl3-plugins/plugin-a --registry https://npm.gl3.dev   # succeeds
+npm pack @gl3-plugins/plugin-a --registry https://npm.gl3.dev   # 403 (store-api logs metadata_only)
+```
+
+The npm client never sees the code `metadata_only` — the plugin turns any denial into its own
+`user is not entitled to package ...` message. Check this service's logs for the `metadata_only`
+line to confirm the denial reached this branch rather than `not_entitled`.
