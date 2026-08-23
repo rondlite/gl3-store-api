@@ -113,8 +113,8 @@ async function seedRow(pkg: string, position: number, fields: Record<string, unk
 describe('GET /v1/catalog/packages', () => {
   it('orders by position then package', async () => {
     await seedRow('@gl3-plugins/b', 2);
-    await seedRow('@gl3-plugins/a', 1);
     await seedRow('@gl3/sdk', 1);
+    await seedRow('@gl3-plugins/a', 1);
 
     const res = await h.call('/v1/catalog/packages');
     expect(res.status).toBe(200);
@@ -184,10 +184,23 @@ describe('GET /v1/catalog/packages', () => {
     expect(packages[0].stale).toBe(true);
   });
 
-  it('marks a package stale once the fetch is older than two intervals', async () => {
+  it('marks a package not stale when just under the threshold (20 minutes)', async () => {
+    await seedRow('@gl3-plugins/a', 1, { version: '1.0.0' });
+    await h.db.query(
+      "update catalog_packages set fetched_at = now() - interval '20 minutes' where package = $1",
+      ['@gl3-plugins/a']
+    );
+
+    const { packages } = (await (await h.call('/v1/catalog/packages')).json()) as {
+      packages: { stale: boolean }[];
+    };
+    expect(packages[0].stale).toBe(false);
+  });
+
+  it('marks a package stale when over the threshold (40 minutes)', async () => {
     await seedRow('@gl3-plugins/a', 1);
     await h.db.query(
-      "update catalog_packages set fetched_at = now() - interval '2 hours' where package = $1",
+      "update catalog_packages set fetched_at = now() - interval '40 minutes' where package = $1",
       ['@gl3-plugins/a']
     );
 
