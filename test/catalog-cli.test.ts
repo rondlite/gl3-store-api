@@ -327,3 +327,57 @@ describe('catalog refresh', () => {
     expect(io.err.join('\n')).not.toMatch(/REGISTRY_URL/);
   });
 });
+
+describe('catalog refresh when the database itself fails', () => {
+  it('exits non-zero rather than reporting an empty pass as success', async () => {
+    // refreshCatalog is built for a background timer: if it cannot even list the
+    // catalogue it logs and returns zero counts, because the next pass will
+    // retry. For a one-shot command that is a real failure reported as success,
+    // so the CLI has to notice it.
+    //
+    // A stub Db is the only way to make a healthy Postgres fail on demand. This
+    // tests our error handling, not SQL.
+    const failing = {
+      query: async () => {
+        throw new Error('connection terminated unexpectedly');
+      },
+    } as unknown as typeof h.db;
+
+    const io = capture();
+    const code = await runCatalogCommand(
+      {
+        db: failing,
+        log: io.log,
+        errorLog: io.errorLog,
+        fetchManifest: async () => null,
+      },
+      ['refresh']
+    );
+
+    expect(code).toBe(1);
+    expect(io.err.join('\n')).toMatch(/connection terminated/);
+  });
+});
+
+describe('registry configuration', () => {
+  it('treats a whitespace-only variable as missing', async () => {
+    const io = capture();
+
+    const code = await runCatalogCommand(
+      {
+        db: h.db,
+        log: io.log,
+        errorLog: io.errorLog,
+        env: {
+          REGISTRY_URL: 'https://npm.gl3.dev',
+          REGISTRY_USERNAME: 'storefront',
+          REGISTRY_TOKEN: '   ',
+        },
+      },
+      ['refresh']
+    );
+
+    expect(code).toBe(1);
+    expect(io.err.join('\n')).toMatch(/REGISTRY_TOKEN/);
+  });
+});

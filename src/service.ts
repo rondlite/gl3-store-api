@@ -309,3 +309,22 @@ export async function getCatalogPackage(
   );
   return rows[0] ?? null;
 }
+
+/** Gap left between appended catalogue entries. */
+const CATALOG_POSITION_STEP = 10;
+
+/**
+ * The position an appended catalogue entry should take.
+ *
+ * Leaves a gap so a package can later be slotted between two existing entries
+ * without renumbering the list. Not atomic with the insert that follows it: two
+ * concurrent appends can pick the same position, which is harmless because
+ * every read orders by (position, package) and so stays deterministic.
+ */
+export async function nextCatalogPosition(db: Db): Promise<number> {
+  const { rows } = await db.query<{ max: number | null }>(
+    'select max(position) as max from catalog_packages'
+  );
+  const highest = rows[0]?.max ?? null;
+  return highest === null ? CATALOG_POSITION_STEP : highest + CATALOG_POSITION_STEP;
+}

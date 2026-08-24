@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { nextCatalogPosition } from '../src/service.js';
 import { setupHarness } from './helpers.js';
 
 const h = setupHarness();
@@ -253,5 +254,19 @@ describe('internal API key', () => {
   it('rejects a request with no key', async () => {
     const res = await h.call('/v1/catalog/packages', { key: null });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('nextCatalogPosition', () => {
+  it('starts at ten when the catalogue is empty', async () => {
+    expect(await nextCatalogPosition(h.db)).toBe(10);
+  });
+
+  it('leaves a gap of ten after the highest position', async () => {
+    // Gaps so a package can be slotted between two existing entries later
+    // without renumbering the whole list.
+    await addPkg({ package: '@gl3-plugins/plugin-a', position: 25 });
+
+    expect(await nextCatalogPosition(h.db)).toBe(35);
   });
 });

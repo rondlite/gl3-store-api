@@ -2,10 +2,15 @@ import { fileURLToPath } from 'node:url';
 
 import { type FetchManifest, refreshCatalog } from './catalog-refresh.js';
 import { createPool, type Db } from './db.js';
-import { silentLogger } from './log.js';
+import { type Logger, silentLogger } from './log.js';
 import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isPaidPackage } from './packages.js';
 import { fetchManifest as fetchFromRegistry } from './registry.js';
-import { addCatalogPackage, listCatalog, removeCatalogPackage } from './service.js';
+import {
+  addCatalogPackage,
+  listCatalog,
+  nextCatalogPosition,
+  removeCatalogPackage,
+} from './service.js';
 
 export type CatalogCliDeps = {
   db: Db;
@@ -16,17 +21,6 @@ export type CatalogCliDeps = {
   /** Overridden by tests so the registry configuration check is drivable. */
   env?: Record<string, string | undefined>;
 };
-
-/** Gap between appended entries, so a package can be slotted between two later. */
-const POSITION_STEP = 10;
-
-async function nextPosition(db: Db): Promise<number> {
-  const { rows } = await db.query<{ max: number | null }>(
-    'select max(position) as max from catalog_packages'
-  );
-  const highest = rows[0]?.max ?? null;
-  return highest === null ? POSITION_STEP : highest + POSITION_STEP;
-}
 
 async function add(deps: CatalogCliDeps, args: string[]): Promise<number> {
   const packageName = args[0];
@@ -46,7 +40,7 @@ async function add(deps: CatalogCliDeps, args: string[]): Promise<number> {
   let position: number;
 
   if (rawPosition === undefined) {
-    position = await nextPosition(deps.db);
+    position = await nextCatalogPosition(deps.db);
   } else {
     position = Number(rawPosition);
     if (!Number.isInteger(position)) {
@@ -99,6 +93,17 @@ async function remove(deps: CatalogCliDeps, args: string[]): Promise<number> {
   return 0;
 }
 
+/** Renders a log line and its fields as one string for a terminal. */
+function format(msg: string, fields?: Record<string, unknown>): string {
+  if (fields === undefined || Object.keys(fields).length === 0) {
+    return msg;
+  }
+  const rendered = Object.entries(fields)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(' ');
+  return `${msg}: ${rendered}`;
+}
+
 /**
  * Builds the registry client from the environment, or names what is missing.
  *
@@ -114,7 +119,7 @@ function registryFetch(
 
   const env = deps.env ?? process.env;
   const missing = ['REGISTRY_URL', 'REGISTRY_USERNAME', 'REGISTRY_TOKEN'].filter(
-    (name) => (env[name] ?? '') === ''
+    (name) => (env[name] ?? '').trim() === ''
   );
 
   if (missing.length > 0) {
@@ -142,17 +147,32 @@ async function refresh(deps: CatalogCliDeps): Promise<number> {
     return 1;
   }
 
-  // The pass logs its own per-package warnings through a Logger. The counts it
-  // returns are what an operator reads, so the pass itself stays quiet here.
-  const result = await refreshCatalog(deps.db, registry.fetch, silentLogger());
+  // refreshCatalog is built for the in-process timer: if it cannot even list the
+  // catalogue it logs the error and returns zero counts, because the next pass
+  // will retry. For a one-shot command that would be a total failure reported as
+  // success, since zero counts also describe an empty catalogue. So its errors are
+  // surfaced and remembered rather than dropped into a silent logger.
+  let sawError = false;
+
+  const logger: Logger = {
+    ...silentLogger(),
+    warn: (msg, fields) => deps.errorLog(format(msg, fields)),
+    error: (msg, fields) => {
+      sawError = true;
+      deps.errorLog(format(msg, fields));
+    },
+  };
+
+  const result = await refreshCatalog(deps.db, registry.fetch, logger);
 
   deps.log(
     `${result.refreshed} refreshed, ${result.failed} failed, ${result.skipped} skipped (not published)`
   );
 
-  // Non-zero on any failure so a broken credential or an unreachable registry is
-  // not reported to a deploy script as success.
-  return result.failed > 0 ? 1 : 0;
+  // Non-zero on any failure so a broken credential, an unreachable registry, or a
+  // database that could not even be read is not reported to a deploy script as
+  // success.
+  return sawError || result.failed > 0 ? 1 : 0;
 }
 
 /**
