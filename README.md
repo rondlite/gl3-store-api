@@ -115,6 +115,42 @@ curl -sX POST localhost:8080/v1/admin/catalog \
   -d '{"package":"@gl3-plugins/plugin-a","position":10}'
 ```
 
+#### Managing the catalogue without the API
+
+This service runs on an internal network with no public route, so reaching the admin
+routes with `curl` means already being inside that network. `catalog-cli` avoids the
+problem by talking to Postgres directly. It is a one-shot command in the same shape as
+the migration runner, and it needs no API key at all.
+
+```bash
+node dist/catalog-cli.js add <package> [position]
+node dist/catalog-cli.js list
+node dist/catalog-cli.js remove <package>
+node dist/catalog-cli.js refresh
+```
+
+`add`, `list` and `remove` need only `DATABASE_URL`. `refresh` also needs
+`REGISTRY_URL`, `REGISTRY_USERNAME` and `REGISTRY_TOKEN`, and it names any that are
+missing rather than failing obscurely. Nothing here ever wants `INTERNAL_API_KEY`.
+
+Omitting the position appends to the end of the list, leaving a gap of ten so a package
+can later be slotted between two existing entries without renumbering. Re-adding a
+package that is already catalogued repositions it instead of duplicating it.
+
+`refresh` runs one pass immediately rather than waiting up to `REGISTRY_REFRESH_MS`,
+which is what you want straight after registering something. It exits non-zero if any
+package failed to fetch, so a revoked credential is not reported to a deploy script as
+success. A package the registry does not have yet counts as skipped rather than failed.
+
+In a container, run it the same way as a migration:
+
+```bash
+docker run --rm --network <net> -e DATABASE_URL=... \
+  ghcr.io/rondlite/gl3-store-api:main node dist/catalog-cli.js list
+```
+
+In development, `npm run catalog -- add @gl3/plugin-sdk 10`.
+
 ## Development
 
 Needs Node >= 22 and a Postgres you can reach.
