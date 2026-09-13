@@ -32,6 +32,7 @@ describe('annual Stripe adapter (no database or network)', () => {
     const { payments, prices } = harness();
     prices.price_annual.tax_behavior = behavior;
     await expect(payments.price()).rejects.toThrow('inclusive EUR');
+    await expect(payments.price()).rejects.toMatchObject({ invalidFields: ['annual.tax_behavior'] });
   });
   it('rejects an incorrect renewal or first-year price', async () => {
     const { payments, prices } = harness();

@@ -1,6 +1,7 @@
 import type { Db } from './db.js';
 import type { Logger } from './log.js';
 import { unseal } from './secrets.js';
+import { premiumErrorFields, PurchaseEmailError } from './premium-diagnostics.js';
 
 export type PurchaseMail = { invoiceId: string; orderId: string; email: string; username: string;
   token: string | null; amount: number; paidUntil: string; renewalAmount: number };
@@ -19,7 +20,7 @@ export function createResendMailer(config: { apiKey: string; from: string; origi
       body: JSON.stringify({ from: config.from, to: [mail.email], subject: 'Your GL3 Premium payment',
         text: `Thank you for your GL3 Premium payment of ${euro(mail.amount)}, including VAT.\n\nThis payment covers Premium access through ${mail.paidUntil}. Premium renews annually at ${euro(mail.renewalAmount)}, including VAT, unless you cancel. You can check your current subscription and cancel future renewals from your account.\n\n${credentials}\n\nTo install plugins:\n\nnpm config set @gl3-plugins:registry https://npm.gl3.dev\nnpm login --registry https://npm.gl3.dev --auth-type=legacy\nnpm install @gl3-plugins/market\n\nUse your gl3_ token as the password when npm asks.\n\nPremium support: https://discord.gg/6U8ezKE8T\nInstallation and upgrade help, plus engine and official plugin bug fixes. We aim to respond within 2 business days; no SLA or custom development. Support and registry access end when your subscription lapses. Your installed plugins keep running.\n\nAI is optional: plugins work with built-in templates or behaviour. You can connect your own OpenAI-compatible endpoint if you want model-generated content or decisions.\n\nManage your subscription: ${config.origin}/account.html\nOrder reference: ${mail.orderId}\n` }),
     });
-    if (!response.ok) throw new Error('purchase_email_failed');
+    if (!response.ok) throw new PurchaseEmailError(response.status);
   };
 }
 
@@ -50,11 +51,11 @@ export async function deliverPurchaseMail(db: Db, key: Buffer, send: SendPurchas
         await client.query(`update premium_orders set email_sent_at = coalesce(email_sent_at, now()), token_ciphertext =
           case when claimed_at is not null or fulfilled_at < now() - interval '7 days'
           then null else token_ciphertext end where id = $1`, [mail.order_id]);
-      } catch {
+      } catch (err) {
+        logger.warn('purchase email deferred', { invoiceId: mail.id, ...premiumErrorFields(err) });
         await client.query(`update premium_invoices set email_attempts = email_attempts + 1,
           email_retry_at = now() + $2 * interval '1 second' where id = $1`,
         [mail.id, Math.min(3600, 30 * 2 ** Math.min(mail.email_attempts, 7))]);
-        logger.warn('purchase email deferred', { invoiceId: mail.id });
       }
     }
     await client.query('commit');
@@ -70,7 +71,7 @@ export function startPurchaseMail(db: Db, key: Buffer, send: SendPurchaseMail, l
   let running: Promise<void>;
   async function tick() {
     try { await deliverPurchaseMail(db, key, send, logger); }
-    catch { logger.error('purchase email worker failed'); }
+    catch (err) { logger.error('purchase email worker failed', premiumErrorFields(err)); }
     if (!stopped) timer = setTimeout(() => { running = tick(); }, 2000);
   }
   running = tick();

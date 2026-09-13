@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { PremiumPriceConfigurationError } from './premium-diagnostics.js';
 
 export const PREMIUM_TERMS = { billing: 'annual' as const, firstYearAmount: 6900,
   renewalAmount: 4900, currency: 'eur', vatIncluded: true };
@@ -37,13 +38,18 @@ export function createPayments(config: { secretKey: string; webhookSecret: strin
       const [annual, firstYear] = await Promise.all([
         stripe.prices.retrieve(config.priceId), stripe.prices.retrieve(config.firstYearPriceId),
       ]);
-      if (!annual.active || annual.currency !== 'eur' || annual.unit_amount !== 4900 ||
-          annual.tax_behavior !== 'inclusive' || annual.recurring?.interval !== 'year' ||
-          annual.recurring.interval_count !== 1 || annual.recurring.usage_type !== 'licensed' ||
-          !firstYear.active || firstYear.type !== 'one_time' || firstYear.unit_amount !== 2000 ||
-          firstYear.currency !== 'eur' || firstYear.tax_behavior !== 'inclusive') {
-        throw new Error('Premium requires inclusive EUR prices: 49 annually plus 20 on the first invoice only');
-      }
+      const checks: [string, unknown, unknown][] = [
+        ['annual.active', annual.active, true], ['annual.currency', annual.currency, 'eur'],
+        ['annual.unit_amount', annual.unit_amount, 4900], ['annual.tax_behavior', annual.tax_behavior, 'inclusive'],
+        ['annual.recurring.interval', annual.recurring?.interval, 'year'],
+        ['annual.recurring.interval_count', annual.recurring?.interval_count, 1],
+        ['annual.recurring.usage_type', annual.recurring?.usage_type, 'licensed'],
+        ['firstYear.active', firstYear.active, true], ['firstYear.type', firstYear.type, 'one_time'],
+        ['firstYear.unit_amount', firstYear.unit_amount, 2000], ['firstYear.currency', firstYear.currency, 'eur'],
+        ['firstYear.tax_behavior', firstYear.tax_behavior, 'inclusive'],
+      ];
+      const invalidFields = checks.filter(([, actual, expected]) => actual !== expected).map(([field]) => field);
+      if (invalidFields.length) throw new PremiumPriceConfigurationError(invalidFields);
       return { ...PREMIUM_TERMS, id: annual.id, firstYearPriceId: firstYear.id };
     },
     async customer(id, email) {

@@ -3,6 +3,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { PremiumError, type Premium } from './premium.js';
 import type { Logger } from './log.js';
+import { premiumErrorFields } from './premium-diagnostics.js';
 
 const credentials = z.object({ username: z.string().min(1).max(100), token: z.string().regex(/^gl3_[A-Za-z0-9_-]{43}$/) });
 const proofSchema = z.object({
@@ -23,7 +24,7 @@ export function premiumRoutes(premium: Premium | undefined, logger: Logger) {
   app.onError((err, c) => {
     if (err instanceof PremiumError) return c.json({ error: err.code }, err.status);
     // Stripe, SQL and email errors may carry credentials or buyer information.
-    logger.error('premium operation failed', { path: c.req.path });
+    logger.error('premium operation failed', { path: c.req.path, ...premiumErrorFields(err) });
     return c.json({ error: 'premium_unavailable' }, 503);
   });
   app.get('/price', async (c) => c.json(await premium!.price()));
