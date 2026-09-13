@@ -1,6 +1,9 @@
 import { serve } from '@hono/node-server';
 
 import { createApp } from './app.js';
+import { createPayments } from './payments.js';
+import { createPremium } from './premium.js';
+import { createResendMailer, startPurchaseMail } from './premium-mail.js';
 import { startCatalogRefresh } from './catalog-refresh.js';
 import { createPool } from './db.js';
 import { loadEnv } from './env.js';
@@ -10,7 +13,19 @@ import { fetchManifest } from './registry.js';
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
 const db = createPool(env.DATABASE_URL);
+const premium = env.STRIPE_SECRET_KEY ? createPremium({
+  db,
+  encryptionKey: Buffer.from(env.PREMIUM_TOKEN_KEY!, 'hex'),
+  payments: createPayments({ secretKey: env.STRIPE_SECRET_KEY,
+    webhookSecret: env.STRIPE_WEBHOOK_SECRET!, priceId: env.STRIPE_PREMIUM_PRICE_ID!,
+    firstYearPriceId: env.STRIPE_FIRST_YEAR_PRICE_ID!, portalConfigurationId: env.STRIPE_PORTAL_CONFIGURATION_ID!,
+    origin: env.PUBLIC_ORIGIN }),
+}) : undefined;
+const stopPurchaseMail = premium ? startPurchaseMail(db, Buffer.from(env.PREMIUM_TOKEN_KEY!, 'hex'),
+  createResendMailer({ apiKey: env.RESEND_API_KEY!, from: env.PREMIUM_EMAIL_FROM!, origin: env.PUBLIC_ORIGIN }), logger)
+  : async () => {};
 const app = createApp({
+  ...(premium ? { premium } : {}),
   db,
   internalApiKey: env.INTERNAL_API_KEY,
   logger,
@@ -58,6 +73,7 @@ const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
 async function shutdown(signal: string) {
   logger.info('shutting down', { signal });
   stopCatalogRefresh();
+  await stopPurchaseMail();
   server.close(() => {
     db.end().then(
       () => process.exit(0),

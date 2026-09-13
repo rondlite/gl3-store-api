@@ -4,6 +4,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 
 import type { Db } from './db.js';
+import { accountRoutes } from './account-routes.js';
+import type { Premium } from './premium.js';
+import { premiumRoutes } from './premium-routes.js';
 import { DEFAULT_REGISTRY_REFRESH_MS } from './env.js';
 import { type Logger, silentLogger } from './log.js';
 import { PUBLIC_SCOPE, SCOPE, isCatalogPackage, isPaidPackage, isSellablePackage, parsePattern } from './packages.js';
@@ -26,6 +29,7 @@ import {
 
 export type AppDeps = {
   db: Db;
+  premium?: Premium;
   internalApiKey: string;
   logger?: Logger;
   /**
@@ -78,6 +82,7 @@ function presentCatalogRow(
 
 export function createApp({
   db,
+  premium,
   internalApiKey,
   logger = silentLogger(),
   catalogStaleMs = 2 * DEFAULT_REGISTRY_REFRESH_MS,
@@ -135,6 +140,9 @@ export function createApp({
 
     return next();
   });
+
+  app.route('/v1/premium', premiumRoutes(premium, logger));
+  app.route('/v1/account', accountRoutes(db));
 
   app.post(
     '/v1/auth/authenticate',

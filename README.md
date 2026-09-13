@@ -266,3 +266,120 @@ npm pack @gl3-plugins/plugin-a --registry https://npm.gl3.dev   # 403 (store-api
 The npm client never sees the code `metadata_only` — the plugin turns any denial into its own
 `user is not entitled to package ...` message. Check this service's logs for the `metadata_only`
 line to confirm the denial reached this branch rather than `not_entitled`.
+
+## Annual Premium storefront
+
+Premium costs **€69 for the first year, then €49 annually**, including VAT. Returning
+buyers pay €49 after a lapse by signing in with their existing npm credentials.
+Premium support uses [Discord](https://discord.gg/6U8ezKE8T). Resend sends transactional
+purchase and renewal emails.
+
+The website proxies a small set of `/v1/premium/*` and `/v1/account/*` routes; all still
+require the internal API key. Registry access is granted only from verified paid
+invoices. The entitlement expires at the end of the paid period. Installed plugins
+continue running after expiry; credentials remain valid for signing in and renewing.
+
+### Stripe configuration
+
+Create these prices in the same Stripe account and mode as the secret key:
+
+| Setting | Required Stripe configuration |
+| --- | --- |
+| `STRIPE_PREMIUM_PRICE_ID` | €49 EUR, recurring every year, licensed quantity, inclusive tax |
+| `STRIPE_FIRST_YEAR_PRICE_ID` | €20 EUR, one-time, inclusive tax; label it as the first-year supplement |
+| `STRIPE_PORTAL_CONFIGURATION_ID` | An active Customer Portal configuration; allow cancellation **at period end**, payment-method updates and invoices; disable subscription plan/quantity changes |
+
+The first invoice combines €49 annual access with the €20 first-year supplement.
+Stripe automatically excludes the one-time item from later invoices. Returning-customer
+checkout omits it. Both items require inclusive tax, so tax is not added above €69/€49.
+Use the appropriate product tax code and configure Stripe Tax and applicable tax
+registrations. This integration uses Stripe Checkout/Billing/Tax, not a merchant-of-record
+product. Adaptive currency conversion and promotion codes are disabled for these terms.
+
+Enable the public webhook at **`https://gl3.dev/api/premium/webhook`** for:
+
+- `checkout.session.completed`
+- `checkout.session.async_payment_succeeded`
+- `invoice.paid`
+- `charge.refunded`
+
+The website forwards the raw body and Stripe signature unchanged. The store API verifies
+the signature, re-fetches the invoice and subscription, and validates customer identity,
+price IDs, currency and amount against the saved order. Full charge refunds remove the
+refunded invoice's access period. Partial refunds do not revoke access. Subscription
+status, cancellation and payment problems are read from Stripe when the buyer opens
+account management; an unpaid invoice never extends the entitlement. A refund does not
+itself cancel future subscription billing—cancel it in Stripe when appropriate.
+
+Buyer-specific price IDs and renewal amounts are persisted for rate protection. Changing
+a new-customer price later must not rewrite `premium_buyers` records or existing Stripe
+subscription items. The website also validates the advertised pricing contract, so a
+future price change requires a coordinated implementation and copy change.
+
+### Resend and credentials
+
+Set `RESEND_API_KEY` and `PREMIUM_EMAIL_FROM` to a sender in a verified Resend domain.
+Set `PREMIUM_TOKEN_KEY` to 32 cryptographically random bytes encoded as 64 hex characters
+(for example, generate it with `openssl rand -hex 32`). Keep the same key on every replica
+and preserve it during deploys until all encrypted token deliveries have completed.
+
+`PUBLIC_ORIGIN` must match the website's public origin, including scheme and port in
+development. Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, both price IDs and the
+portal configuration ID. The API refuses partial Premium configuration. If none of the
+Premium settings are present, registry functionality stays available and checkout
+reports unavailable.
+
+Each paid invoice is a durable email job. The worker retries failures with backoff and
+uses `premium-invoice/<invoice-id>` as the Resend idempotency key. Resend deduplicates
+requests for 24 hours; if a process dies after sending but before committing, a retry
+beyond that window can send a duplicate email. No new token is minted for that retry.
+Monitor `purchase email deferred` and `purchase email worker failed` logs and query
+pending `premium_invoices` if mail delivery stalls. A provider accepting a message is
+not proof that the recipient's inbox accepted it; monitor bounces in Resend as well.
+
+Only new accounts receive a newly minted token. Tokens are hashed for authentication;
+a separate AES-GCM encrypted copy is retained for on-screen claim and email delivery.
+The browser's random checkout proof, not a Stripe Session ID, authorises the one-time
+claim. After a successful email and claim the encrypted copy is removed, or after seven
+days if already emailed. An undelivered token remains encrypted while the queue retries.
+Never log request bodies, tokens, buyer emails, or encryption/API keys.
+
+### Routes
+
+| Method | Path | Body / purpose |
+| --- | --- | --- |
+| GET | `/v1/premium/price` | Validated annual pricing terms; no secret or provider configuration |
+| POST | `/v1/premium/start` | `{orderId, claimSecret, email? , auth?: {username, token}}`; email for new buyers, verified credentials for existing accounts |
+| POST | `/v1/premium/status` | `{orderId, claimSecret}`; fulfilment and paid-through date |
+| POST | `/v1/premium/claim` | Same proof; show a new account's credentials once |
+| POST | `/v1/premium/billing` | `{username, token}`; renewal eligibility and subscription status |
+| POST | `/v1/premium/portal` | `{username, token}`; Stripe portal URL for that buyer only |
+| POST | `/v1/premium/webhook` | Raw Stripe event with `Stripe-Signature` |
+| POST | `/v1/account/profile` | `{username, token}`; identity and current Premium access |
+| POST | `/v1/account/rotate-token` | `{username, token}`; replace only the presented token, revoke it atomically |
+
+### Validation before launch
+
+Run migrations as a separate deployment step, including `004_premium_orders.sql` and
+`005_annual_premium.sql`. Do not start the new Premium worker before applying them.
+The full test suite truncates its configured test database. It must never target a
+shared development, staging or production database.
+
+Database-free checks:
+
+```bash
+npm run build
+npm test -- test/payments.test.ts test/env.test.ts
+```
+
+Then, once database work is available, run `npm test` against an explicitly isolated
+`TEST_DATABASE_URL`. Exercise a full Stripe test-mode purchase, initial €69 invoice,
+€49 annual renewal, failed payment, cancellation at period end, lapsed return at €49,
+replayed/out-of-order webhooks, full refunds and Resend retries. Use a Stripe test clock
+for renewal periods. Verify that expired access denies a tarball download while existing
+local plugins still run and account sign-in works.
+
+Release validation on 13 September 2026 passed all 131 API tests against the isolated
+`gl3_store_premium_release_20260913` database, including annual renewals and €49 returning
+checkout. The build also passes. No real Stripe payments or emails have been sent as
+part of implementation, and production migrations still need to run on deployment.
